@@ -1765,6 +1765,90 @@ def plot_shot_analysis(df_shots, zoom_y=None):
     return fig
 
 # ==============================================================================
+# --- TMD LOG ---
+# ==============================================================================
+
+def load_tmd_log(file) -> pd.DataFrame:
+    """
+    Loads a TMD log file. Expected columns:
+        Date/Time   — session event timestamp
+        Machine ID  — press identifier
+        Tooling ID  — tool identifier (blank on UNMATCHED)
+        Status      — AUTO_MATCHED | UNMATCHED
+    Returns a cleaned DataFrame sorted by Machine ID, Date/Time.
+    """
+    try:
+        df = pd.read_excel(file) if hasattr(file, 'name') and file.name.endswith(('.xls','.xlsx')) else pd.read_csv(file)
+        df.columns = [c.strip() for c in df.columns]
+
+        col_map = {c.strip().upper(): c for c in df.columns}
+        def _gc(*targets):
+            for t in targets:
+                found = col_map.get(t.upper())
+                if found: return found
+            return None
+
+        dt_col   = _gc("DATE/TIME","DATETIME","DATE TIME","TIMESTAMP","DATE")
+        mach_col = _gc("MACHINE ID","MACHINE_ID","MACHINE")
+        tool_col = _gc("TOOLING ID","TOOLING_ID","TOOL ID","TOOL_ID","EQUIPMENT_CODE")
+        stat_col = _gc("STATUS")
+
+        rename = {}
+        if dt_col   and dt_col   != "Date/Time":   rename[dt_col]   = "Date/Time"
+        if mach_col and mach_col != "Machine ID":   rename[mach_col] = "Machine ID"
+        if tool_col and tool_col != "Tooling ID":   rename[tool_col] = "Tooling ID"
+        if stat_col and stat_col != "Status":       rename[stat_col] = "Status"
+        df.rename(columns=rename, inplace=True)
+
+        df["Date/Time"] = pd.to_datetime(df["Date/Time"], errors="coerce")
+        df.dropna(subset=["Date/Time","Machine ID","Status"], inplace=True)
+        df["Tooling ID"] = df["Tooling ID"].fillna("").astype(str).str.strip()
+        df["Status"]     = df["Status"].str.strip().str.upper()
+        df = df[df["Status"].isin(["AUTO_MATCHED","UNMATCHED"])].copy()
+        return df.sort_values(["Machine ID","Date/Time"]).reset_index(drop=True)
+    except Exception as e:
+        return pd.DataFrame()
+
+
+def assign_machine_from_tmd(df_shots: pd.DataFrame, df_tmd: pd.DataFrame) -> pd.DataFrame:
+    """
+    Joins shots to TMD sessions by timestamp window.
+    For each machine: pairs each AUTO_MATCHED with the next UNMATCHED event
+    to define a session window, then assigns machine_id to shots whose
+    shot_time falls within that window.
+
+    Returns df_shots with a new 'machine_id' column (NaN where no session matched).
+    """
+    if df_tmd.empty or df_shots.empty:
+        return df_shots
+
+    df_shots = df_shots.copy()
+    df_shots["machine_id"] = np.nan
+
+    for machine_id, grp in df_tmd.groupby("Machine ID"):
+        grp = grp.sort_values("Date/Time").reset_index(drop=True)
+        matched = grp[grp["Status"] == "AUTO_MATCHED"].reset_index(drop=True)
+        unmatched = grp[grp["Status"] == "UNMATCHED"].reset_index(drop=True)
+
+        for _, m_row in matched.iterrows():
+            session_start = m_row["Date/Time"]
+            tool_id       = m_row["Tooling ID"]
+
+            # Next UNMATCHED on this machine after the AUTO_MATCHED
+            following = unmatched[unmatched["Date/Time"] > session_start]
+            session_end = following.iloc[0]["Date/Time"] if not following.empty else df_shots["shot_time"].max()
+
+            mask = (
+                (df_shots["shot_time"] >= session_start) &
+                (df_shots["shot_time"] <  session_end) &
+                (df_shots["tool_id"].astype(str) == str(tool_id))
+            )
+            df_shots.loc[mask, "machine_id"] = machine_id
+
+    return df_shots
+
+
+# ==============================================================================
 # --- MACHINE FIT ANALYSIS ---
 # ==============================================================================
 
@@ -1824,16 +1908,41 @@ def compute_machine_fit_metrics(df_processed: pd.DataFrame, config: dict) -> pd.
         avg_ct = prod_df['actual_ct'].mean() if not prod_df.empty else 0.0
         ct_cv  = (prod_df['actual_ct'].std() / avg_ct * 100) if (not prod_df.empty and avg_ct > 0) else 0.0
 
+        # Improvement rate: compare cap efficiency of first-half runs vs second-half runs
+        run_ids_sorted = grp.groupby('run_id')['shot_time'].min().sort_values().index.tolist()
+        improvement_rate = np.nan
+        if len(run_ids_sorted) >= 2:
+            mid = len(run_ids_sorted) // 2
+            first_half = run_ids_sorted[:mid]
+            second_half = run_ids_sorted[mid:]
+            def _run_cap_eff(run_ids):
+                sub = grp[grp['run_id'].isin(run_ids)]
+                sub_prod = sub[sub['stop_flag'] == 0]
+                sub_act = float(sub_prod['working_cavities'].sum()) if 'working_cavities' in sub_prod.columns else float(len(sub_prod))
+                sub_opt = 0.0
+                for _, r in sub.groupby('run_id'):
+                    dur = (r['shot_time'].max() - r['shot_time'].min()).total_seconds() + float(r.iloc[-1]['actual_ct'])
+                    r_ct = float(r['approved_ct_for_run'].iloc[0]) if 'approved_ct_for_run' in r.columns else float(r['approved_ct'].iloc[0])
+                    r_cav = float(r['working_cavities'].max()) if 'working_cavities' in r.columns else 1.0
+                    if r_ct > 0: sub_opt += (dur / r_ct) * r_cav
+                return (sub_act / sub_opt * 100) if sub_opt > 0 else 0.0
+            eff_first  = _run_cap_eff(first_half)
+            eff_second = _run_cap_eff(second_half)
+            improvement_rate = round(eff_second - eff_first, 1)
+
         records.append({
             'tool_id':             tool_id,
             'machine_id':          machine_id,
             'runs':                n_runs,
             'total_shots':         total_shots,
+            'production_hrs':      round(total_runtime / 3600, 1),
+            'total_parts':         round(act_output, 0),
             'avg_ct_sec':          round(avg_ct, 2),
-            'ct_cv_pct':           round(ct_cv, 2),
+            'ct_fluctuation_pct':  round(ct_cv, 2),
             'efficiency_pct':      round(eff_rate, 1),
             'stability_pct':       round(stab_idx, 1),
             'cap_efficiency_pct':  round(cap_eff, 1),
+            'improvement_rate':    improvement_rate,
             'slow_loss_parts':     round(cap_loss_slow, 0),
             'fast_gain_parts':     round(cap_gain_fast, 0),
             'mtbf_min':            round(mtbf_min, 1),
@@ -1860,15 +1969,60 @@ def compute_machine_fit_metrics(df_processed: pd.DataFrame, config: dict) -> pd.
             _hi(tgrp['stability_pct'])       * 25 +
             _hi(tgrp['efficiency_pct'])      * 20 +
             _hi(tgrp['mtbf_min'])            * 15 +
-            _lo(tgrp['ct_cv_pct'])           * 10
+            _lo(tgrp['ct_fluctuation_pct'])  * 10
         )
         score_rows.append(score)
 
     df['fit_score'] = pd.concat(score_rows).reindex(df.index).round(1)
+
+    # Rename ct_cv_pct legacy ref if any — already stored as ct_fluctuation_pct
     return df
 
 
-def plot_machine_fit_heatmap(fit_df: pd.DataFrame) -> go.Figure:
+def compute_plant_machine_scorecard(fit_df: pd.DataFrame, machine_master: pd.DataFrame = None) -> pd.DataFrame:
+    """
+    Aggregates fit_df to plant → machine level for the holistic overview scorecard.
+    Merges plant from machine_master if provided.
+    Returns one row per machine with key supply-chain KPIs.
+    """
+    agg = fit_df.groupby('machine_id').agg(
+        total_tools        =('tool_id',           'nunique'),
+        total_runs         =('runs',              'sum'),
+        total_parts        =('total_parts',       'sum'),
+        production_hrs     =('production_hrs',    'sum'),
+        avg_fit_score      =('fit_score',         'mean'),
+        avg_cap_eff        =('cap_efficiency_pct','mean'),
+        avg_stability      =('stability_pct',     'mean'),
+        avg_efficiency     =('efficiency_pct',    'mean'),
+        avg_mtbf           =('mtbf_min',          'mean'),
+        avg_mttr           =('mttr_min',          'mean'),
+        total_slow_loss    =('slow_loss_parts',   'sum'),
+        total_fast_gain    =('fast_gain_parts',   'sum'),
+        avg_improvement    =('improvement_rate',  'mean'),
+    ).round(1).reset_index()
+
+    if machine_master is not None and not machine_master.empty:
+        id_col = next(
+            (c for c in machine_master.columns
+             if c.strip().lower() in ('machine id', 'machine_id', 'machinecode')),
+            None
+        )
+        if id_col:
+            mm = machine_master.rename(columns={id_col: 'machine_id'})
+            meta = ['machine_id'] + [c for c in
+                ['Plant ID', 'Line', 'Machine Maker', 'Machine Type',
+                 'Machine Model', 'Machine Tonnage (ton)']
+                if c in mm.columns]
+            agg = agg.merge(mm[meta], on='machine_id', how='left')
+
+    # Plant-level rank (within plant if available, else global)
+    group_col = 'Plant ID' if 'Plant ID' in agg.columns else None
+    if group_col:
+        agg['plant_rank'] = agg.groupby(group_col)['avg_fit_score'] \
+                               .rank(ascending=False, method='min').astype(int)
+    agg['overall_rank'] = agg['avg_fit_score'].rank(ascending=False, method='min').astype(int)
+
+    return agg.sort_values('overall_rank').reset_index(drop=True)
     """
     Heatmap of machine-tool performance. Machines on Y, metrics on X.
     Each cell normalised within the column (0–1); green = better, red = worse.
@@ -1876,17 +2030,20 @@ def plot_machine_fit_heatmap(fit_df: pd.DataFrame) -> go.Figure:
     """
     # (column, display label, True=higher better, False=lower better, None=neutral)
     METRIC_CFG = [
-        ('fit_score',          'Fit Score',     True),
-        ('cap_efficiency_pct', 'Cap Eff %',     True),
-        ('stability_pct',      'Stability %',   True),
-        ('efficiency_pct',     'Efficiency %',  True),
-        ('mtbf_min',           'MTBF (min)',    True),
-        ('mttr_min',           'MTTR (min)',    False),
-        ('slow_loss_parts',    'Slow Loss',     False),
-        ('fast_gain_parts',    'Fast Gain',     True),
-        ('ct_cv_pct',          'CT CV%',        False),
-        ('avg_ct_sec',         'Avg CT (s)',    None),
-        ('runs',               'Runs',          None),
+        ('fit_score',            'Fit Score',       True),
+        ('cap_efficiency_pct',   'Cap Eff %',       True),
+        ('stability_pct',        'Stability %',     True),
+        ('efficiency_pct',       'Efficiency %',    True),
+        ('improvement_rate',     'Improvement',     True),
+        ('mtbf_min',             'MTBF (min)',      True),
+        ('mttr_min',             'MTTR (min)',      False),
+        ('slow_loss_parts',      'Slow Loss',       False),
+        ('fast_gain_parts',      'Fast Gain',       True),
+        ('ct_fluctuation_pct',   'CT Fluctuation%', False),
+        ('avg_ct_sec',           'Avg CT (s)',      None),
+        ('production_hrs',       'Prod Hrs',        None),
+        ('total_parts',          'Total Parts',     None),
+        ('runs',                 'Runs',            None),
     ]
 
     machines = fit_df['machine_id'].tolist()

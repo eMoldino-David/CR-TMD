@@ -1278,6 +1278,10 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Machine Fit (Optional)")
+    tmd_log_file = st.sidebar.file_uploader(
+        "TMD Log (Excel)", type=['xlsx', 'xls'], key="cr_tmd_log",
+        help="Upload tmd_log.xlsx to derive machine-tool sessions and enable the Machine Fit tab."
+    )
     machine_master_file = st.sidebar.file_uploader(
         "Machine Master (Excel)", type=['xlsx', 'xls'], key="cr_machine_master",
         help="Upload machines.xlsx to enrich the Machine Fit tab with maker, tonnage etc."
@@ -1313,6 +1317,15 @@ def main():
             tools_ref = pd.read_excel(tools_ref_file)
         except Exception:
             st.sidebar.warning("Could not load tools reference file.")
+
+    if tmd_log_file:
+        df_tmd = cr_CG_utils.load_tmd_log(tmd_log_file)
+        if not df_tmd.empty:
+            df_all = cr_CG_utils.assign_machine_from_tmd(df_all, df_tmd)
+            matched_pct = df_all['machine_id'].notna().mean() * 100
+            st.sidebar.success(f"TMD log loaded — {matched_pct:.0f}% of shots matched to a machine session.")
+        else:
+            st.sidebar.warning("TMD log could not be parsed. Check column names.")
 
     # ── Sidebar: Global Filters (aligned to RR) ──────────────────────────────
     # Date Range → Project → Material → Part → Supplier → Plant → Tooling Type
@@ -1575,18 +1588,12 @@ def main():
     #                         working_days_per_week, working_hours_per_day)
 
 def render_machine_fit_tab(df_processed_global, config, machine_master=None, tools_ref=None, key_suffix=''):
-    """Renders the Machine Fit Analysis tab."""
-    st.header("Machine Fit Analysis")
-    st.info(
-        "Ranks machines by historical performance for each tool using cycle time, "
-        "efficiency, stability, MTBF, MTTR, slow/fast cycles and a composite fit score. "
-        "Requires a **MACHINE_ID** column in your production data."
-    )
+    """Renders the Machine Fit Analysis tab — 3 sub-tabs: Overview, Rankings, Deep Dive."""
+    st.header("🔧 Machine Fit Analysis")
 
-    if 'machine_id' not in df_processed_global.columns:
+    if 'machine_id' not in df_processed_global.columns or df_processed_global['machine_id'].isna().all():
         st.warning(
-            "⚠️ No MACHINE_ID column found in your production data. "
-            "Ensure your file contains a MACHINE_ID column (the new device data) to use this feature."
+            "⚠️ No machine session data found. Upload a TMD Log in the sidebar to enable this tab."
         )
         return
 
@@ -1597,8 +1604,8 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
         st.warning("No machine-tool pair data could be computed.")
         return
 
-    # ── Build copy group map from optional tools reference ────────────────────
-    copy_map = {}  # tool_id → group_name
+    # Build copy group map
+    copy_map = {}
     if tools_ref is not None and not tools_ref.empty:
         for _, row in tools_ref.iterrows():
             grp = row.get('copy_group')
@@ -1606,249 +1613,362 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
             if tid and pd.notna(grp) and str(grp).strip() not in ('', 'nan', 'None'):
                 copy_map[tid] = str(grp)
 
-    all_tools   = sorted(fit_df['tool_id'].unique())
-    copy_tools  = {t for t in all_tools if t in copy_map}
-    single_tools = {t for t in all_tools if t not in copy_map}
-
-    # ── Filters ───────────────────────────────────────────────────────────────
-    st.markdown("### Tool Selection")
-    c_scope, c_minruns = st.columns([3, 1])
-    with c_scope:
-        scope = st.radio(
-            "Scope", ["All Tools", "Copy Tools Only", "Single Tools Only"],
-            horizontal=True, key=f"mf_scope{key_suffix}"
-        )
-    with c_minruns:
-        min_runs = st.number_input("Min Runs (confidence threshold)", min_value=1, value=2,
-                                   key=f"mf_min_runs{key_suffix}")
-
-    if scope == "Copy Tools Only":
-        available = sorted(copy_tools)
-    elif scope == "Single Tools Only":
-        available = sorted(single_tools)
-    else:
-        available = all_tools
-
-    if not available:
-        st.warning("No tools match the current scope.")
-        return
-
-    def _tool_label(tid):
-        grp = copy_map.get(tid)
-        return f"{tid}  [Copy: {grp}]" if grp else tid
-
-    selected_tool = st.selectbox(
-        "Select Tool", options=available, format_func=_tool_label,
-        key=f"mf_tool_select{key_suffix}"
-    )
-
-    grp_name = copy_map.get(selected_tool)
-    siblings = [t for t in all_tools if copy_map.get(t) == grp_name and t != selected_tool] if grp_name else []
-
-    if grp_name:
-        sib_str = ", ".join(siblings) if siblings else "none in current data"
-        st.info(f"📋 **Copy Group: {grp_name}** — Siblings in data: {sib_str}")
-    else:
-        st.caption("🔹 Single tool — no copy group assigned")
-
-    st.markdown("---")
-
-    # ── Per-tool metrics ──────────────────────────────────────────────────────
-    tool_fit = fit_df[fit_df['tool_id'] == selected_tool].copy()
-
-    def _confidence(r):
-        if r >= min_runs * 3: return "✅ High"
-        if r >= min_runs:     return "⚠️ Low"
-        return "🔴 Very Low"
-
-    tool_fit['confidence'] = tool_fit['runs'].apply(_confidence)
-    tool_fit = tool_fit.sort_values('fit_score', ascending=False).reset_index(drop=True)
-
-    # Merge machine master metadata if provided
-    if machine_master is not None and not machine_master.empty:
-        id_col = next(
-            (c for c in machine_master.columns
-             if c.strip().lower() in ('machine id', 'machine_id', 'machinecode')),
-            None
-        )
-        if id_col:
-            mm = machine_master.rename(columns={id_col: 'machine_id'})
-            meta_cols = ['machine_id'] + [
-                c for c in ['Machine Maker', 'Machine Type', 'Machine Model',
-                            'Machine Tonnage (ton)', 'Plant ID', 'Line']
-                if c in mm.columns
-            ]
-            tool_fit = tool_fit.merge(mm[meta_cols], on='machine_id', how='left')
+    C = cr_CG_utils.PASTEL_COLORS
 
     # ── Sub-tabs ──────────────────────────────────────────────────────────────
-    sub_rank, sub_heat, sub_cmp = st.tabs(
-        ["📊 Rankings & Detail", "🗺️ Heatmap", "🔄 Copy Group Compare"]
-    )
+    sub_overview, sub_rankings, sub_deepdive = st.tabs([
+        "🌐 Overview", "📊 Tool-Machine Rankings", "🔬 Deep Dive"
+    ])
 
-    # ── Rankings & Detail ─────────────────────────────────────────────────────
-    with sub_rank:
-        st.subheader(f"Machine Rankings — {selected_tool}")
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 1 — HOLISTIC OVERVIEW
+    # ══════════════════════════════════════════════════════════════════════════
+    with sub_overview:
+        st.subheader("Supply Chain Overview — Machine Performance Scorecard")
+        st.caption("Aggregated across all tools that have run on each machine. "
+                   "Ranks machines within plant and globally by composite fit score.")
 
-        if len(tool_fit) < 2:
-            st.warning("Only one machine found for this tool. Need ≥2 machines to compare.")
+        scorecard = cr_CG_utils.compute_plant_machine_scorecard(
+            fit_df, machine_master if machine_master is not None else pd.DataFrame()
+        )
+
+        if scorecard.empty:
+            st.warning("Not enough data to generate scorecard.")
         else:
-            best  = tool_fit.iloc[0]
-            worst = tool_fit.iloc[-1]
-            COLORS = cr_CG_utils.PASTEL_COLORS
+            # ── Top-level KPI strip ───────────────────────────────────────────
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("Machines Active",      f"{scorecard['machine_id'].nunique()}")
+            k2.metric("Total Tools Tracked",  f"{fit_df['tool_id'].nunique()}")
+            k3.metric("Total Parts Produced", f"{scorecard['total_parts'].sum():,.0f}")
+            k4.metric("Total Production Hrs", f"{scorecard['production_hrs'].sum():,.0f} h")
+            k5.metric("Avg Fleet Fit Score",  f"{scorecard['avg_fit_score'].mean():.0f} / 100")
 
-            c_b, c_w = st.columns(2)
-            with c_b:
-                st.markdown(f"""
-                <div style="background:#162616;border:1px solid {COLORS['green']};border-radius:8px;padding:16px;margin-bottom:12px">
-                    <h4 style="color:{COLORS['green']};margin-top:0">✅ Best Match: {best['machine_id']}</h4>
-                    <table style="width:100%;font-size:0.85em;border-collapse:collapse">
-                    <tr><td style="padding:3px 6px">Fit Score</td>     <td style="padding:3px 6px"><b>{best['fit_score']:.0f} / 100</b></td></tr>
-                    <tr><td style="padding:3px 6px">Confidence</td>    <td style="padding:3px 6px">{best['confidence']} ({int(best['runs'])} runs)</td></tr>
-                    <tr><td style="padding:3px 6px">Cap Efficiency</td><td style="padding:3px 6px">{best['cap_efficiency_pct']:.1f}%</td></tr>
-                    <tr><td style="padding:3px 6px">Stability</td>     <td style="padding:3px 6px">{best['stability_pct']:.1f}%</td></tr>
-                    <tr><td style="padding:3px 6px">Efficiency</td>    <td style="padding:3px 6px">{best['efficiency_pct']:.1f}%</td></tr>
-                    <tr><td style="padding:3px 6px">Avg CT</td>        <td style="padding:3px 6px">{best['avg_ct_sec']:.2f}s</td></tr>
-                    <tr><td style="padding:3px 6px">CT CV%</td>        <td style="padding:3px 6px">{best['ct_cv_pct']:.2f}%</td></tr>
-                    <tr><td style="padding:3px 6px">MTBF</td>          <td style="padding:3px 6px">{best['mtbf_min']:.0f} min</td></tr>
-                    <tr><td style="padding:3px 6px">MTTR</td>          <td style="padding:3px 6px">{best['mttr_min']:.1f} min</td></tr>
-                    <tr><td style="padding:3px 6px">Slow Loss</td>     <td style="padding:3px 6px">{best['slow_loss_parts']:,.0f} parts</td></tr>
-                    <tr><td style="padding:3px 6px">Fast Gain</td>     <td style="padding:3px 6px">{best['fast_gain_parts']:,.0f} parts</td></tr>
-                    </table>
-                </div>""", unsafe_allow_html=True)
+            st.markdown("---")
 
-            with c_w:
-                st.markdown(f"""
-                <div style="background:#261616;border:1px solid {COLORS['red']};border-radius:8px;padding:16px;margin-bottom:12px">
-                    <h4 style="color:{COLORS['red']};margin-top:0">⚠️ Worst Match: {worst['machine_id']}</h4>
-                    <table style="width:100%;font-size:0.85em;border-collapse:collapse">
-                    <tr><td style="padding:3px 6px">Fit Score</td>     <td style="padding:3px 6px"><b>{worst['fit_score']:.0f} / 100</b></td></tr>
-                    <tr><td style="padding:3px 6px">Confidence</td>    <td style="padding:3px 6px">{worst['confidence']} ({int(worst['runs'])} runs)</td></tr>
-                    <tr><td style="padding:3px 6px">Cap Efficiency</td><td style="padding:3px 6px">{worst['cap_efficiency_pct']:.1f}%</td></tr>
-                    <tr><td style="padding:3px 6px">Stability</td>     <td style="padding:3px 6px">{worst['stability_pct']:.1f}%</td></tr>
-                    <tr><td style="padding:3px 6px">Efficiency</td>    <td style="padding:3px 6px">{worst['efficiency_pct']:.1f}%</td></tr>
-                    <tr><td style="padding:3px 6px">Avg CT</td>        <td style="padding:3px 6px">{worst['avg_ct_sec']:.2f}s</td></tr>
-                    <tr><td style="padding:3px 6px">CT CV%</td>        <td style="padding:3px 6px">{worst['ct_cv_pct']:.2f}%</td></tr>
-                    <tr><td style="padding:3px 6px">MTBF</td>          <td style="padding:3px 6px">{worst['mtbf_min']:.0f} min</td></tr>
-                    <tr><td style="padding:3px 6px">MTTR</td>          <td style="padding:3px 6px">{worst['mttr_min']:.1f} min</td></tr>
-                    <tr><td style="padding:3px 6px">Slow Loss</td>     <td style="padding:3px 6px">{worst['slow_loss_parts']:,.0f} parts</td></tr>
-                    <tr><td style="padding:3px 6px">Fast Gain</td>     <td style="padding:3px 6px">{worst['fast_gain_parts']:,.0f} parts</td></tr>
-                    </table>
-                </div>""", unsafe_allow_html=True)
+            # ── Plant breakdown ───────────────────────────────────────────────
+            if 'Plant ID' in scorecard.columns:
+                plants = sorted(scorecard['Plant ID'].dropna().unique())
+                plant_filter = st.multiselect(
+                    "Filter by Plant", options=plants, default=list(plants),
+                    key=f"ov_plant{key_suffix}"
+                )
+                sc_view = scorecard[scorecard['Plant ID'].isin(plant_filter)] if plant_filter else scorecard
+            else:
+                sc_view = scorecard
 
-        st.markdown("#### Full Rankings")
+            # ── Best / Worst machine cards ────────────────────────────────────
+            if len(sc_view) >= 2:
+                best  = sc_view.iloc[0]
+                worst = sc_view.iloc[-1]
+                cb, cw = st.columns(2)
+                for col, m, color, label in [
+                    (cb, best,  C['green'], "✅ Top Machine"),
+                    (cw, worst, C['red'],   "⚠️ Lowest Machine"),
+                ]:
+                    with col:
+                        plant_str = f" ({m['Plant ID']})" if 'Plant ID' in m and pd.notna(m.get('Plant ID')) else ""
+                        maker_str = m.get('Machine Maker','') or ''
+                        st.markdown(f"""
+                        <div style="background:#1a1a2e;border:1px solid {color};border-radius:8px;padding:14px;margin-bottom:10px">
+                            <h4 style="color:{color};margin-top:0">{label}: {m['machine_id']}{plant_str}</h4>
+                            <p style="margin:2px 0;font-size:0.85em;color:#aaa">{maker_str}</p>
+                            <table style="width:100%;font-size:0.83em;border-collapse:collapse">
+                            <tr><td style="padding:2px 5px">Fit Score</td>      <td><b>{m['avg_fit_score']:.0f}/100</b></td></tr>
+                            <tr><td style="padding:2px 5px">Cap Efficiency</td> <td>{m['avg_cap_eff']:.1f}%</td></tr>
+                            <tr><td style="padding:2px 5px">Stability</td>      <td>{m['avg_stability']:.1f}%</td></tr>
+                            <tr><td style="padding:2px 5px">Prod Hours</td>     <td>{m['production_hrs']:,.0f} h</td></tr>
+                            <tr><td style="padding:2px 5px">Total Parts</td>    <td>{m['total_parts']:,.0f}</td></tr>
+                            <tr><td style="padding:2px 5px">Tools Run</td>      <td>{int(m['total_tools'])}</td></tr>
+                            <tr><td style="padding:2px 5px">MTBF</td>           <td>{m['avg_mtbf']:.0f} min</td></tr>
+                            <tr><td style="padding:2px 5px">MTTR</td>           <td>{m['avg_mttr']:.1f} min</td></tr>
+                            <tr><td style="padding:2px 5px">Improvement</td>    <td>{m['avg_improvement']:+.1f} pp</td></tr>
+                            </table>
+                        </div>""", unsafe_allow_html=True)
 
-        base_cols = ['machine_id', 'fit_score', 'confidence', 'runs',
-                     'cap_efficiency_pct', 'stability_pct', 'efficiency_pct',
-                     'avg_ct_sec', 'ct_cv_pct', 'slow_loss_parts', 'fast_gain_parts',
-                     'mtbf_min', 'mttr_min', 'stop_count', 'downtime_hrs']
-        meta_cols_present = [c for c in ['Machine Maker', 'Machine Type', 'Machine Tonnage (ton)', 'Plant ID', 'Line']
-                             if c in tool_fit.columns]
-        display_cols = ['machine_id'] + meta_cols_present + [c for c in base_cols if c != 'machine_id']
-        display_df = tool_fit[[c for c in display_cols if c in tool_fit.columns]].copy()
+            st.markdown("#### Full Machine Scorecard")
 
-        col_rename = {
-            'machine_id': 'Machine', 'fit_score': 'Fit Score', 'confidence': 'Confidence',
-            'runs': 'Runs', 'cap_efficiency_pct': 'Cap Eff %', 'stability_pct': 'Stability %',
-            'efficiency_pct': 'Efficiency %', 'avg_ct_sec': 'Avg CT (s)', 'ct_cv_pct': 'CT CV%',
+            disp_cols = ['overall_rank', 'machine_id']
+            meta_order = ['Plant ID', 'Line', 'Machine Maker', 'Machine Tonnage (ton)']
+            disp_cols += [c for c in meta_order if c in sc_view.columns]
+            disp_cols += ['total_tools', 'total_runs', 'total_parts', 'production_hrs',
+                          'avg_fit_score', 'avg_cap_eff', 'avg_stability', 'avg_efficiency',
+                          'avg_improvement', 'avg_mtbf', 'avg_mttr',
+                          'total_slow_loss', 'total_fast_gain']
+            if 'plant_rank' in sc_view.columns:
+                disp_cols.insert(2, 'plant_rank')
+
+            sc_display = sc_view[[c for c in disp_cols if c in sc_view.columns]].rename(columns={
+                'overall_rank': '# Overall', 'plant_rank': '# In Plant',
+                'machine_id': 'Machine', 'total_tools': 'Tools',
+                'total_runs': 'Runs', 'total_parts': 'Parts',
+                'production_hrs': 'Prod Hrs', 'avg_fit_score': 'Fit Score',
+                'avg_cap_eff': 'Cap Eff %', 'avg_stability': 'Stability %',
+                'avg_efficiency': 'Efficiency %', 'avg_improvement': 'Improvement (pp)',
+                'avg_mtbf': 'MTBF (min)', 'avg_mttr': 'MTTR (min)',
+                'total_slow_loss': 'Slow Loss', 'total_fast_gain': 'Fast Gain',
+                'Plant ID': 'Plant', 'Machine Maker': 'Maker',
+                'Machine Tonnage (ton)': 'Tonnage',
+            })
+
+            def _style_scorecard(row):
+                styles = [''] * len(row)
+                for i, col in enumerate(sc_display.columns):
+                    if col == 'Fit Score':
+                        v = row[col]
+                        if v >= 70:   styles[i] = f'color:{C["green"]};font-weight:bold'
+                        elif v >= 45: styles[i] = f'color:{C["orange"]}'
+                        else:         styles[i] = f'color:{C["red"]}'
+                    elif col in ('Cap Eff %', 'Stability %', 'Efficiency %'):
+                        v = row[col]
+                        if v >= 90:   styles[i] = f'color:{C["green"]}'
+                        elif v >= 75: styles[i] = f'color:{C["orange"]}'
+                        else:         styles[i] = f'color:{C["red"]}'
+                    elif col == 'Improvement (pp)':
+                        v = row[col]
+                        styles[i] = f'color:{C["green"]}' if v > 0 else (f'color:{C["red"]}' if v < 0 else '')
+                return styles
+
+            st.dataframe(
+                sc_display.style.apply(_style_scorecard, axis=1).format(precision=1, na_rep='—'),
+                use_container_width=True, hide_index=True
+            )
+
+            # ── Plant pivot ───────────────────────────────────────────────────
+            if 'Plant' in sc_display.columns:
+                st.markdown("#### Pivot: Plant × Metric")
+                pivot_metric = st.selectbox(
+                    "Metric for pivot", ['Fit Score', 'Cap Eff %', 'Stability %', 'Parts', 'Prod Hrs'],
+                    key=f"ov_pivot_metric{key_suffix}"
+                )
+                pivot_df = pd.pivot_table(
+                    sc_display, values=pivot_metric,
+                    index='Plant', aggfunc='mean'
+                ).round(1)
+                st.dataframe(pivot_df, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 2 — TOOL-MACHINE RANKINGS
+    # ══════════════════════════════════════════════════════════════════════════
+    with sub_rankings:
+        st.subheader("Tool Performance by Machine")
+        st.caption("Each row = one tool-machine combination. "
+                   "Improvement Rate = cap efficiency delta between first-half and second-half runs (positive = getting better).")
+
+        # ── Filters ───────────────────────────────────────────────────────────
+        fc1, fc2, fc3, fc4 = st.columns([2, 2, 1, 1])
+        all_tools    = sorted(fit_df['tool_id'].unique())
+        all_machines = sorted(fit_df['machine_id'].unique())
+
+        with fc1:
+            scope = st.radio("Tool scope", ["All", "Copy Tools", "Single Tools"],
+                             horizontal=True, key=f"rk_scope{key_suffix}")
+        with fc2:
+            machine_filter = st.multiselect("Filter Machines", all_machines,
+                                            default=[], key=f"rk_machine{key_suffix}")
+        with fc3:
+            min_runs_rk = st.number_input("Min Runs", 1, value=1, key=f"rk_minruns{key_suffix}")
+        with fc4:
+            sort_col = st.selectbox("Sort by", ['fit_score', 'cap_efficiency_pct',
+                                                'improvement_rate', 'production_hrs',
+                                                'total_parts', 'stability_pct', 'mtbf_min'],
+                                    key=f"rk_sort{key_suffix}")
+
+        rk_df = fit_df.copy()
+        if scope == "Copy Tools":
+            rk_df = rk_df[rk_df['tool_id'].isin(copy_map.keys())]
+        elif scope == "Single Tools":
+            rk_df = rk_df[~rk_df['tool_id'].isin(copy_map.keys())]
+        if machine_filter:
+            rk_df = rk_df[rk_df['machine_id'].isin(machine_filter)]
+        rk_df = rk_df[rk_df['runs'] >= min_runs_rk].sort_values(sort_col, ascending=False).reset_index(drop=True)
+
+        rk_df['copy_group'] = rk_df['tool_id'].map(copy_map).fillna('—')
+        rk_df['rank'] = range(1, len(rk_df) + 1)
+        rk_df['improvement_label'] = rk_df['improvement_rate'].apply(
+            lambda v: f"▲ +{v:.1f} pp" if (pd.notna(v) and v > 0)
+                 else (f"▼ {v:.1f} pp" if (pd.notna(v) and v < 0) else "— n/a")
+        )
+
+        display_rk = rk_df[[
+            'rank', 'tool_id', 'copy_group', 'machine_id', 'runs',
+            'production_hrs', 'total_parts',
+            'fit_score', 'cap_efficiency_pct', 'stability_pct', 'efficiency_pct',
+            'improvement_label', 'avg_ct_sec', 'ct_fluctuation_pct',
+            'slow_loss_parts', 'fast_gain_parts', 'mtbf_min', 'mttr_min',
+        ]].rename(columns={
+            'rank': '#', 'tool_id': 'Tool', 'copy_group': 'Copy Group',
+            'machine_id': 'Machine', 'runs': 'Runs',
+            'production_hrs': 'Prod Hrs', 'total_parts': 'Parts',
+            'fit_score': 'Fit Score', 'cap_efficiency_pct': 'Cap Eff %',
+            'stability_pct': 'Stability %', 'efficiency_pct': 'Efficiency %',
+            'improvement_label': 'Improvement', 'avg_ct_sec': 'Avg CT (s)',
+            'ct_fluctuation_pct': 'CT Fluctuation%',
             'slow_loss_parts': 'Slow Loss', 'fast_gain_parts': 'Fast Gain',
             'mtbf_min': 'MTBF (min)', 'mttr_min': 'MTTR (min)',
-            'stop_count': 'Stops', 'downtime_hrs': 'Downtime (h)',
-        }
-        display_df = display_df.rename(columns=col_rename)
+        })
 
-        COLORS = cr_CG_utils.PASTEL_COLORS
-
-        def _style_fit(row):
+        def _style_rk(row):
             styles = [''] * len(row)
-            for i, col in enumerate(display_df.columns):
+            for i, col in enumerate(display_rk.columns):
                 if col == 'Fit Score':
                     v = row[col]
-                    if v >= 70:   styles[i] = f'color:{COLORS["green"]};font-weight:bold'
-                    elif v >= 40: styles[i] = f'color:{COLORS["orange"]}'
-                    else:         styles[i] = f'color:{COLORS["red"]}'
+                    if v >= 70:   styles[i] = f'color:{C["green"]};font-weight:bold'
+                    elif v >= 45: styles[i] = f'color:{C["orange"]}'
+                    else:         styles[i] = f'color:{C["red"]}'
                 elif col in ('Cap Eff %', 'Stability %', 'Efficiency %'):
                     v = row[col]
-                    if v >= 90:   styles[i] = f'color:{COLORS["green"]}'
-                    elif v >= 75: styles[i] = f'color:{COLORS["orange"]}'
-                    else:         styles[i] = f'color:{COLORS["red"]}'
+                    if v >= 90:   styles[i] = f'color:{C["green"]}'
+                    elif v >= 75: styles[i] = f'color:{C["orange"]}'
+                    else:         styles[i] = f'color:{C["red"]}'
+                elif col == 'Improvement':
+                    styles[i] = f'color:{C["green"]}' if '▲' in str(row[col]) else (
+                                 f'color:{C["red"]}'   if '▼' in str(row[col]) else '')
             return styles
 
         st.dataframe(
-            display_df.style.apply(_style_fit, axis=1).format(precision=1, na_rep='—'),
-            use_container_width=True, hide_index=True
+            display_rk.style.apply(_style_rk, axis=1).format(
+                {c: '{:.1f}' for c in ['Fit Score','Cap Eff %','Stability %','Efficiency %',
+                                        'Avg CT (s)','CT Fluctuation%','MTBF (min)','MTTR (min)']},
+                na_rep='—'
+            ),
+            use_container_width=True, hide_index=True, height=480
         )
 
-    # ── Heatmap ───────────────────────────────────────────────────────────────
-    with sub_heat:
-        st.subheader("Performance Heatmap")
-        st.caption(
-            "Each cell is normalised within this tool's machines. "
-            "Green = better, Red = worse, for that specific metric. "
-            "Fit Score, Cap Eff, Stability, Efficiency, MTBF, Fast Gain = higher is better. "
-            "MTTR, Slow Loss, CT CV% = lower is better. Avg CT and Runs are shown neutrally."
+        # ── Pivot: Tool × Machine for selected metric ─────────────────────────
+        st.markdown("#### Pivot: Tool × Machine")
+        pv_metric = st.selectbox(
+            "Metric", ['fit_score', 'cap_efficiency_pct', 'stability_pct',
+                       'production_hrs', 'total_parts', 'improvement_rate'],
+            format_func=lambda x: {
+                'fit_score': 'Fit Score', 'cap_efficiency_pct': 'Cap Efficiency %',
+                'stability_pct': 'Stability %', 'production_hrs': 'Production Hours',
+                'total_parts': 'Total Parts', 'improvement_rate': 'Improvement Rate (pp)',
+            }.get(x, x),
+            key=f"rk_pv_metric{key_suffix}"
         )
-        fig_hm = cr_CG_utils.plot_machine_fit_heatmap(tool_fit)
-        st.plotly_chart(fig_hm, use_container_width=True, key=f"mf_heatmap{key_suffix}")
+        if not rk_df.empty:
+            pv = pd.pivot_table(
+                fit_df[fit_df['tool_id'].isin(rk_df['tool_id'])],
+                values=pv_metric, index='tool_id', columns='machine_id',
+                aggfunc='mean'
+            ).round(1)
+            st.dataframe(pv, use_container_width=True)
 
-    # ── Copy Group Compare ────────────────────────────────────────────────────
-    with sub_cmp:
-        if not grp_name or not siblings:
-            st.info("Select a copy tool that has siblings in the current data to use this view.")
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 3 — DEEP DIVE
+    # ══════════════════════════════════════════════════════════════════════════
+    with sub_deepdive:
+        st.subheader("Deep Dive — Single Tool")
+
+        all_tools_dd = sorted(fit_df['tool_id'].unique())
+
+        def _tool_label_dd(tid):
+            grp = copy_map.get(tid)
+            return f"{tid}  [Copy: {grp}]" if grp else tid
+
+        dd_tool = st.selectbox("Select Tool", all_tools_dd, format_func=_tool_label_dd,
+                                key=f"dd_tool{key_suffix}")
+
+        grp_name = copy_map.get(dd_tool)
+        siblings = [t for t in all_tools_dd if copy_map.get(t) == grp_name and t != dd_tool] if grp_name else []
+
+        if grp_name:
+            st.info(f"📋 **Copy Group: {grp_name}** — Siblings in data: {', '.join(siblings) if siblings else 'none'}")
         else:
-            st.subheader(f"Copy Group: {grp_name}")
-            st.caption(
-                "Compares how each copy tool performs on the same machines. "
-                "Helps distinguish machine-driven vs tool-driven performance differences."
-            )
-            all_in_group = [selected_tool] + siblings
-            group_fit = fit_df[fit_df['tool_id'].isin(all_in_group)].copy()
+            st.caption("🔹 Single tool — no copy group")
 
-            # Grouped bar — fit score per machine per tool
-            COLORS = cr_CG_utils.PASTEL_COLORS
-            palette = [COLORS['blue'], COLORS['green'], COLORS['orange']]
-            fig_cmp = go.Figure()
-            for i, tid in enumerate(all_in_group):
-                tdf = group_fit[group_fit['tool_id'] == tid].sort_values('machine_id')
-                if tdf.empty:
-                    continue
-                fig_cmp.add_trace(go.Bar(
-                    name=tid,
-                    x=tdf['machine_id'],
-                    y=tdf['fit_score'],
-                    marker_color=palette[i % len(palette)],
-                    opacity=0.85,
-                    text=tdf['fit_score'].round(0).astype(int),
-                    textposition='outside',
-                ))
-            fig_cmp.update_layout(
-                barmode='group',
-                title=f"Fit Score by Machine — {grp_name}",
-                xaxis_title="Machine", yaxis_title="Fit Score (0–100)",
-                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-            )
-            st.plotly_chart(fig_cmp, use_container_width=True, key=f"mf_cmp_chart{key_suffix}")
+        tool_fit = fit_df[fit_df['tool_id'] == dd_tool].copy()
+        tool_fit = tool_fit.sort_values('fit_score', ascending=False).reset_index(drop=True)
 
-            # Summary table per copy tool
-            best_idx = group_fit.groupby('tool_id')['fit_score'].idxmax()
-            best_machines = group_fit.loc[best_idx].set_index('tool_id')['machine_id']
+        if machine_master is not None and not machine_master.empty:
+            id_col = next((c for c in machine_master.columns
+                           if c.strip().lower() in ('machine id','machine_id','machinecode')), None)
+            if id_col:
+                mm = machine_master.rename(columns={id_col: 'machine_id'})
+                meta_cols = ['machine_id'] + [c for c in
+                    ['Machine Maker','Machine Type','Machine Model',
+                     'Machine Tonnage (ton)','Plant ID','Line'] if c in mm.columns]
+                tool_fit = tool_fit.merge(mm[meta_cols], on='machine_id', how='left')
 
-            grp_summary = group_fit.groupby('tool_id').agg(
-                avg_fit_score    =('fit_score',         'mean'),
-                avg_cap_eff      =('cap_efficiency_pct','mean'),
-                avg_stability    =('stability_pct',     'mean'),
-                avg_efficiency   =('efficiency_pct',    'mean'),
-                avg_mtbf         =('mtbf_min',          'mean'),
-                total_runs       =('runs',              'sum'),
-            ).round(1).reset_index()
-            grp_summary['best_machine'] = grp_summary['tool_id'].map(best_machines)
-            grp_summary = grp_summary.rename(columns={
-                'tool_id': 'Tool', 'avg_fit_score': 'Avg Fit Score',
-                'avg_cap_eff': 'Avg Cap Eff %', 'avg_stability': 'Avg Stability %',
-                'avg_efficiency': 'Avg Efficiency %', 'avg_mtbf': 'Avg MTBF (min)',
-                'total_runs': 'Total Runs', 'best_machine': 'Best Machine',
+        n_mach = len(tool_fit)
+        if n_mach < 1:
+            st.warning("No data for this tool.")
+        else:
+            # ── Metric cards per machine ──────────────────────────────────────
+            st.markdown("#### Machine Comparison Cards")
+            card_cols = st.columns(min(n_mach, 4))
+            for i, (_, row) in enumerate(tool_fit.iterrows()):
+                col = card_cols[i % min(n_mach, 4)]
+                score = row['fit_score']
+                bcolor = C['green'] if score >= 70 else (C['orange'] if score >= 45 else C['red'])
+                imp = row.get('improvement_rate', np.nan)
+                imp_str = f"{imp:+.1f} pp" if pd.notna(imp) else "n/a"
+                imp_color = C['green'] if (pd.notna(imp) and imp > 0) else (C['red'] if (pd.notna(imp) and imp < 0) else '#aaa')
+                with col:
+                    st.markdown(f"""
+                    <div style="background:#1a1a2e;border:1px solid {bcolor};border-radius:8px;padding:12px;margin-bottom:8px;text-align:center">
+                        <b style="color:{bcolor};font-size:1.05em">{row['machine_id']}</b><br>
+                        <span style="font-size:1.6em;font-weight:bold">{score:.0f}</span>
+                        <span style="font-size:0.75em;color:#aaa">/100</span><br>
+                        <span style="font-size:0.78em">Cap Eff: {row['cap_efficiency_pct']:.1f}%</span><br>
+                        <span style="font-size:0.78em">Stability: {row['stability_pct']:.1f}%</span><br>
+                        <span style="font-size:0.78em">Prod Hrs: {row['production_hrs']:,.0f}</span><br>
+                        <span style="font-size:0.78em">Parts: {row['total_parts']:,.0f}</span><br>
+                        <span style="font-size:0.78em;color:{imp_color}">Improvement: {imp_str}</span>
+                    </div>""", unsafe_allow_html=True)
+
+            # ── Heatmap ───────────────────────────────────────────────────────
+            st.markdown("#### Performance Heatmap")
+            fig_hm = cr_CG_utils.plot_machine_fit_heatmap(tool_fit)
+            st.plotly_chart(fig_hm, use_container_width=True, key=f"dd_heatmap{key_suffix}")
+
+            # ── Detail table ──────────────────────────────────────────────────
+            st.markdown("#### Full Detail Table")
+            base_cols = ['machine_id', 'fit_score', 'runs', 'production_hrs', 'total_parts',
+                         'cap_efficiency_pct', 'stability_pct', 'efficiency_pct',
+                         'improvement_rate', 'avg_ct_sec', 'ct_fluctuation_pct',
+                         'slow_loss_parts', 'fast_gain_parts', 'mtbf_min', 'mttr_min',
+                         'stop_count', 'downtime_hrs']
+            meta_present = [c for c in ['Machine Maker','Machine Tonnage (ton)','Plant ID','Line']
+                            if c in tool_fit.columns]
+            dd_display = tool_fit[['machine_id'] + meta_present +
+                                  [c for c in base_cols if c != 'machine_id' and c in tool_fit.columns]
+                                 ].rename(columns={
+                'machine_id':'Machine','fit_score':'Fit Score','runs':'Runs',
+                'production_hrs':'Prod Hrs','total_parts':'Parts',
+                'cap_efficiency_pct':'Cap Eff %','stability_pct':'Stability %',
+                'efficiency_pct':'Efficiency %','improvement_rate':'Improvement (pp)',
+                'avg_ct_sec':'Avg CT (s)','ct_fluctuation_pct':'CT Fluctuation%',
+                'slow_loss_parts':'Slow Loss','fast_gain_parts':'Fast Gain',
+                'mtbf_min':'MTBF (min)','mttr_min':'MTTR (min)',
+                'stop_count':'Stops','downtime_hrs':'Downtime (h)',
+                'Machine Tonnage (ton)':'Tonnage',
             })
-            st.dataframe(grp_summary, use_container_width=True, hide_index=True)
+            st.dataframe(dd_display, use_container_width=True, hide_index=True)
+
+            # ── Copy group bar compare ────────────────────────────────────────
+            if grp_name and siblings:
+                st.markdown(f"#### Copy Group Compare — {grp_name}")
+                all_in_group = [dd_tool] + siblings
+                group_fit = fit_df[fit_df['tool_id'].isin(all_in_group)].copy()
+                palette = [C['blue'], C['green'], C['orange']]
+                fig_cmp = go.Figure()
+                for i, tid in enumerate(all_in_group):
+                    tdf = group_fit[group_fit['tool_id'] == tid].sort_values('machine_id')
+                    if tdf.empty: continue
+                    fig_cmp.add_trace(go.Bar(
+                        name=tid, x=tdf['machine_id'], y=tdf['fit_score'],
+                        marker_color=palette[i % len(palette)], opacity=0.85,
+                        text=tdf['fit_score'].round(0).astype(int), textposition='outside',
+                    ))
+                fig_cmp.update_layout(
+                    barmode='group', title=f"Fit Score by Machine — {grp_name}",
+                    xaxis_title="Machine", yaxis_title="Fit Score (0–100)",
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                )
+                st.plotly_chart(fig_cmp, use_container_width=True, key=f"dd_cmp{key_suffix}")
 
 
 if __name__ == "__main__":
     main()
+
