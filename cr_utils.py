@@ -2023,10 +2023,14 @@ def compute_plant_machine_scorecard(fit_df: pd.DataFrame, machine_master: pd.Dat
     agg['overall_rank'] = agg['avg_fit_score'].rank(ascending=False, method='min').astype(int)
 
     return agg.sort_values('overall_rank').reset_index(drop=True)
+
+
+def plot_machine_fit_heatmap(fit_df: pd.DataFrame) -> go.Figure:
     """
     Heatmap of machine-tool performance. Machines on Y, metrics on X.
     Each cell normalised within the column (0–1); green = better, red = worse.
     Direction (higher/lower is better) is handled per metric.
+    NaN values (e.g. improvement_rate with only 1 run) shown as neutral grey.
     """
     # (column, display label, True=higher better, False=lower better, None=neutral)
     METRIC_CFG = [
@@ -2053,17 +2057,21 @@ def compute_plant_machine_scorecard(fit_df: pd.DataFrame, machine_master: pd.Dat
         if col not in fit_df.columns:
             continue
         vals = fit_df[col].values.astype(float)
-        vmin, vmax, rng = vals.min(), vals.max(), vals.max() - vals.min()
+        valid = vals[~np.isnan(vals)]
+        vmin = valid.min() if len(valid) else 0.0
+        vmax = valid.max() if len(valid) else 0.0
+        rng  = vmax - vmin
 
-        if rng < 1e-9 or direction is None:
-            norm = np.full_like(vals, 0.5)
-        elif direction:
-            norm = (vals - vmin) / rng
-        else:
-            norm = 1.0 - (vals - vmin) / rng
+        norm = np.full_like(vals, 0.5, dtype=float)  # NaN or neutral → 0.5
+        non_nan = ~np.isnan(vals)
+        if rng >= 1e-9 and direction is not None:
+            if direction:
+                norm[non_nan] = (vals[non_nan] - vmin) / rng
+            else:
+                norm[non_nan] = 1.0 - (vals[non_nan] - vmin) / rng
 
         z_norm.append(norm)
-        z_text.append([f"{v:,.1f}" for v in vals])
+        z_text.append([f"{v:,.1f}" if not np.isnan(v) else "—" for v in vals])
         col_labels.append(label)
 
     z  = np.array(z_norm).T   # shape: (n_machines, n_metrics)
