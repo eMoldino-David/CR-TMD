@@ -1823,7 +1823,7 @@ def assign_machine_from_tmd(df_shots: pd.DataFrame, df_tmd: pd.DataFrame) -> pd.
         return df_shots
 
     df_shots = df_shots.copy()
-    df_shots["machine_id"] = np.nan
+    df_shots["machine_id"] = None  # object dtype — accepts string assignment
 
     for machine_id, grp in df_tmd.groupby("Machine ID"):
         grp = grp.sort_values("Date/Time").reset_index(drop=True)
