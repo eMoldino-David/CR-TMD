@@ -1933,6 +1933,7 @@ def compute_machine_fit_metrics(df_processed: pd.DataFrame, config: dict) -> pd.
         records.append({
             'tool_id':             tool_id,
             'machine_id':          machine_id,
+            'supplier_id':         str(grp['supplier_id'].iloc[0]) if 'supplier_id' in grp.columns else 'Unknown',
             'runs':                n_runs,
             'total_shots':         total_shots,
             'production_hrs':      round(total_runtime / 3600, 1),
@@ -1979,50 +1980,41 @@ def compute_machine_fit_metrics(df_processed: pd.DataFrame, config: dict) -> pd.
     return df
 
 
-def compute_plant_machine_scorecard(fit_df: pd.DataFrame, machine_master: pd.DataFrame = None) -> pd.DataFrame:
+def compute_supplier_scorecard(fit_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Aggregates fit_df to plant → machine level for the holistic overview scorecard.
-    Merges plant from machine_master if provided.
-    Returns one row per machine with key supply-chain KPIs.
+    Aggregates fit_df by supplier_id for the holistic supply chain overview.
+    Shows which suppliers have the best machine-tool fit performance.
+    Returns one row per supplier, ranked by avg fit score.
     """
-    agg = fit_df.groupby('machine_id').agg(
-        total_tools        =('tool_id',           'nunique'),
-        total_runs         =('runs',              'sum'),
-        total_parts        =('total_parts',       'sum'),
-        production_hrs     =('production_hrs',    'sum'),
-        avg_fit_score      =('fit_score',         'mean'),
-        avg_cap_eff        =('cap_efficiency_pct','mean'),
-        avg_stability      =('stability_pct',     'mean'),
-        avg_efficiency     =('efficiency_pct',    'mean'),
-        avg_mtbf           =('mtbf_min',          'mean'),
-        avg_mttr           =('mttr_min',          'mean'),
-        total_slow_loss    =('slow_loss_parts',   'sum'),
-        total_fast_gain    =('fast_gain_parts',   'sum'),
-        avg_improvement    =('improvement_rate',  'mean'),
+    if 'supplier_id' not in fit_df.columns:
+        return pd.DataFrame()
+
+    agg = fit_df.groupby('supplier_id').agg(
+        total_tools       =('tool_id',            'nunique'),
+        total_machines    =('machine_id',          'nunique'),
+        total_runs        =('runs',               'sum'),
+        total_parts       =('total_parts',         'sum'),
+        production_hrs    =('production_hrs',      'sum'),
+        avg_fit_score     =('fit_score',           'mean'),
+        avg_cap_eff       =('cap_efficiency_pct',  'mean'),
+        avg_stability     =('stability_pct',       'mean'),
+        avg_efficiency    =('efficiency_pct',      'mean'),
+        avg_mtbf          =('mtbf_min',            'mean'),
+        avg_mttr          =('mttr_min',            'mean'),
+        total_slow_loss   =('slow_loss_parts',     'sum'),
+        total_fast_gain   =('fast_gain_parts',     'sum'),
     ).round(1).reset_index()
 
-    if machine_master is not None and not machine_master.empty:
-        id_col = next(
-            (c for c in machine_master.columns
-             if c.strip().lower() in ('machine id', 'machine_id', 'machinecode')),
-            None
-        )
-        if id_col:
-            mm = machine_master.rename(columns={id_col: 'machine_id'})
-            meta = ['machine_id'] + [c for c in
-                ['Plant ID', 'Line', 'Machine Maker', 'Machine Type',
-                 'Machine Model', 'Machine Tonnage (ton)']
-                if c in mm.columns]
-            agg = agg.merge(mm[meta], on='machine_id', how='left')
+    # Best and worst machine per supplier by avg fit score across their tools
+    best_mach = fit_df.groupby(['supplier_id','machine_id'])['fit_score'].mean() \
+                      .reset_index().sort_values('fit_score', ascending=False)
+    agg['best_machine']  = agg['supplier_id'].map(
+        best_mach.groupby('supplier_id').first()['machine_id'])
+    agg['worst_machine'] = agg['supplier_id'].map(
+        best_mach.groupby('supplier_id').last()['machine_id'])
 
-    # Plant-level rank (within plant if available, else global)
-    group_col = 'Plant ID' if 'Plant ID' in agg.columns else None
-    if group_col:
-        agg['plant_rank'] = agg.groupby(group_col)['avg_fit_score'] \
-                               .rank(ascending=False, method='min').astype(int)
-    agg['overall_rank'] = agg['avg_fit_score'].rank(ascending=False, method='min').astype(int)
-
-    return agg.sort_values('overall_rank').reset_index(drop=True)
+    agg['rank'] = agg['avg_fit_score'].rank(ascending=False, method='min').astype(int)
+    return agg.sort_values('rank').reset_index(drop=True)
 
 
 def plot_machine_fit_heatmap(fit_df: pd.DataFrame) -> go.Figure:
@@ -2098,3 +2090,115 @@ def plot_machine_fit_heatmap(fit_df: pd.DataFrame) -> go.Figure:
         xaxis=dict(side='top'),
     )
     return fig
+
+
+def compute_machine_tool_rankings(fit_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Machine-centric view: for each machine, rank all tools that have run on it.
+    Adds columns:
+      rank_on_machine    — 1 = best tool on this machine
+      vs_best_pct        — cap efficiency delta vs the best tool on this machine (negative = worse)
+      vs_worst_pct       — cap efficiency delta vs the worst tool on this machine (positive = gain potential)
+      parts_gain_potential — extra parts per production hour if this machine ran the best tool instead
+    """
+    if fit_df.empty:
+        return pd.DataFrame()
+
+    out = []
+    for machine_id, grp in fit_df.groupby('machine_id'):
+        grp = grp.copy().sort_values('cap_efficiency_pct', ascending=False).reset_index(drop=True)
+        best_eff  = grp['cap_efficiency_pct'].max()
+        worst_eff = grp['cap_efficiency_pct'].min()
+
+        # Parts per hour for the best tool on this machine
+        best_row = grp.iloc[0]
+        best_parts_per_hr = (best_row['total_parts'] / best_row['production_hrs']
+                             if best_row['production_hrs'] > 0 else 0)
+
+        grp['rank_on_machine']     = range(1, len(grp) + 1)
+        grp['vs_best_pct']         = (grp['cap_efficiency_pct'] - best_eff).round(1)
+        grp['vs_worst_pct']        = (grp['cap_efficiency_pct'] - worst_eff).round(1)
+        # Parts gain potential: how many more parts/hr this machine would produce
+        # if the best tool ran instead of this tool
+        grp['parts_gain_potential'] = grp.apply(
+            lambda r: round((best_parts_per_hr - (r['total_parts'] / r['production_hrs']
+                             if r['production_hrs'] > 0 else 0)), 1),
+            axis=1
+        )
+        out.append(grp)
+
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+
+
+def compute_recommendations(fit_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Generates best-match recommendations and cross-supplier swap opportunities.
+
+    Returns a DataFrame with one row per machine showing:
+      - Current best tool on that machine
+      - If a tool from a different supplier would outperform — a swap recommendation
+      - Quantified gain: extra parts/hr and cap efficiency gain
+    """
+    if fit_df.empty or 'supplier_id' not in fit_df.columns:
+        return pd.DataFrame()
+
+    recs = []
+    for machine_id, grp in fit_df.groupby('machine_id'):
+        grp = grp.sort_values('cap_efficiency_pct', ascending=False).reset_index(drop=True)
+        if grp.empty:
+            continue
+
+        best = grp.iloc[0]
+        worst = grp.iloc[-1] if len(grp) > 1 else best
+
+        # Parts per hour for each tool
+        def _pph(row):
+            return row['total_parts'] / row['production_hrs'] if row['production_hrs'] > 0 else 0
+
+        best_pph  = _pph(best)
+        worst_pph = _pph(worst)
+
+        # Cross-supplier opportunity: best tool from a DIFFERENT supplier than the worst tool
+        cross = grp[grp['supplier_id'] != worst['supplier_id']]
+        swap_tool = cross.iloc[0] if not cross.empty else None
+
+        rec = {
+            'machine_id':           machine_id,
+            'best_tool':            best['tool_id'],
+            'best_supplier':        best['supplier_id'],
+            'best_cap_eff':         round(best['cap_efficiency_pct'], 1),
+            'best_parts_per_hr':    round(best_pph, 1),
+            'worst_tool':           worst['tool_id'],
+            'worst_supplier':       worst['supplier_id'],
+            'worst_cap_eff':        round(worst['cap_efficiency_pct'], 1),
+            'tools_compared':       len(grp),
+            'cap_eff_spread':       round(best['cap_efficiency_pct'] - worst['cap_efficiency_pct'], 1),
+            'parts_gain_best_vs_worst': round(best_pph - worst_pph, 1),
+        }
+
+        if swap_tool is not None and swap_tool['tool_id'] != best['tool_id']:
+            swap_pph = _pph(swap_tool)
+            # Find current tool from swap_tool's supplier on this machine
+            current_same_sup = grp[grp['supplier_id'] == swap_tool['supplier_id']]
+            current_pph = _pph(current_same_sup.iloc[-1]) if not current_same_sup.empty else worst_pph
+            rec.update({
+                'swap_recommended':      True,
+                'swap_tool':             swap_tool['tool_id'],
+                'swap_from_supplier':    worst['supplier_id'],
+                'swap_to_supplier':      swap_tool['supplier_id'],
+                'swap_cap_eff_gain':     round(swap_tool['cap_efficiency_pct'] - worst['cap_efficiency_pct'], 1),
+                'swap_parts_per_hr_gain':round(swap_pph - current_pph, 1),
+            })
+        else:
+            rec.update({
+                'swap_recommended':      False,
+                'swap_tool':             '—',
+                'swap_from_supplier':    '—',
+                'swap_to_supplier':      '—',
+                'swap_cap_eff_gain':     0.0,
+                'swap_parts_per_hr_gain':0.0,
+            })
+
+        recs.append(rec)
+
+    return pd.DataFrame(recs).sort_values('cap_eff_spread', ascending=False).reset_index(drop=True)

@@ -1616,8 +1616,8 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
     C = cr_CG_utils.PASTEL_COLORS
 
     # ── Sub-tabs ──────────────────────────────────────────────────────────────
-    sub_overview, sub_rankings, sub_deepdive = st.tabs([
-        "🌐 Overview", "📊 Tool-Machine Rankings", "🔬 Deep Dive"
+    sub_overview, sub_rankings, sub_recs, sub_deepdive = st.tabs([
+        "🌐 Overview", "📊 Machine Rankings", "💡 Recommendations", "🔬 Deep Dive"
     ])
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1628,89 +1628,65 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
         st.caption("Aggregated across all tools that have run on each machine. "
                    "Ranks machines within plant and globally by composite fit score.")
 
-        scorecard = cr_CG_utils.compute_plant_machine_scorecard(
-            fit_df, machine_master if machine_master is not None else pd.DataFrame()
-        )
+        scorecard = cr_CG_utils.compute_supplier_scorecard(fit_df)
 
         if scorecard.empty:
-            st.warning("Not enough data to generate scorecard.")
+            st.warning("No supplier data found. Ensure SUPPLIER_ID is in your production data.")
         else:
             # ── Top-level KPI strip ───────────────────────────────────────────
             k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("Machines Active",      f"{scorecard['machine_id'].nunique()}")
-            k2.metric("Total Tools Tracked",  f"{fit_df['tool_id'].nunique()}")
-            k3.metric("Total Parts Produced", f"{scorecard['total_parts'].sum():,.0f}")
-            k4.metric("Total Production Hrs", f"{scorecard['production_hrs'].sum():,.0f} h")
-            k5.metric("Avg Fleet Fit Score",  f"{scorecard['avg_fit_score'].mean():.0f} / 100")
+            k1.metric("Suppliers Tracked",   f"{scorecard['supplier_id'].nunique()}")
+            k2.metric("Total Tools",         f"{fit_df['tool_id'].nunique()}")
+            k3.metric("Total Parts Produced",f"{scorecard['total_parts'].sum():,.0f}")
+            k4.metric("Total Production Hrs",f"{scorecard['production_hrs'].sum():,.0f} h")
+            k5.metric("Avg Fleet Fit Score", f"{scorecard['avg_fit_score'].mean():.0f} / 100")
 
             st.markdown("---")
 
-            # ── Plant breakdown ───────────────────────────────────────────────
-            if 'Plant ID' in scorecard.columns:
-                plants = sorted(scorecard['Plant ID'].dropna().unique())
-                plant_filter = st.multiselect(
-                    "Filter by Plant", options=plants, default=list(plants),
-                    key=f"ov_plant{key_suffix}"
-                )
-                sc_view = scorecard[scorecard['Plant ID'].isin(plant_filter)] if plant_filter else scorecard
-            else:
-                sc_view = scorecard
-
-            # ── Best / Worst machine cards ────────────────────────────────────
-            if len(sc_view) >= 2:
-                best  = sc_view.iloc[0]
-                worst = sc_view.iloc[-1]
+            # ── Best / Worst supplier cards ───────────────────────────────────
+            if len(scorecard) >= 2:
+                best  = scorecard.iloc[0]
+                worst = scorecard.iloc[-1]
                 cb, cw = st.columns(2)
                 for col, m, color, label in [
-                    (cb, best,  C['green'], "✅ Top Machine"),
-                    (cw, worst, C['red'],   "⚠️ Lowest Machine"),
+                    (cb, best,  C['green'], "✅ Top Supplier"),
+                    (cw, worst, C['red'],   "⚠️ Lowest Supplier"),
                 ]:
                     with col:
-                        plant_str = f" ({m['Plant ID']})" if 'Plant ID' in m and pd.notna(m.get('Plant ID')) else ""
-                        maker_str = m.get('Machine Maker','') or ''
                         st.markdown(f"""
                         <div style="background:#1a1a2e;border:1px solid {color};border-radius:8px;padding:14px;margin-bottom:10px">
-                            <h4 style="color:{color};margin-top:0">{label}: {m['machine_id']}{plant_str}</h4>
-                            <p style="margin:2px 0;font-size:0.85em;color:#aaa">{maker_str}</p>
+                            <h4 style="color:{color};margin-top:0">{label}: {m['supplier_id']}</h4>
                             <table style="width:100%;font-size:0.83em;border-collapse:collapse">
                             <tr><td style="padding:2px 5px">Fit Score</td>      <td><b>{m['avg_fit_score']:.0f}/100</b></td></tr>
+                            <tr><td style="padding:2px 5px">Tools</td>          <td>{int(m['total_tools'])}</td></tr>
+                            <tr><td style="padding:2px 5px">Machines Used</td>  <td>{int(m['total_machines'])}</td></tr>
+                            <tr><td style="padding:2px 5px">Total Runs</td>     <td>{int(m['total_runs'])}</td></tr>
+                            <tr><td style="padding:2px 5px">Total Parts</td>    <td>{m['total_parts']:,.0f}</td></tr>
+                            <tr><td style="padding:2px 5px">Prod Hours</td>     <td>{m['production_hrs']:,.0f} h</td></tr>
                             <tr><td style="padding:2px 5px">Cap Efficiency</td> <td>{m['avg_cap_eff']:.1f}%</td></tr>
                             <tr><td style="padding:2px 5px">Stability</td>      <td>{m['avg_stability']:.1f}%</td></tr>
-                            <tr><td style="padding:2px 5px">Prod Hours</td>     <td>{m['production_hrs']:,.0f} h</td></tr>
-                            <tr><td style="padding:2px 5px">Total Parts</td>    <td>{m['total_parts']:,.0f}</td></tr>
-                            <tr><td style="padding:2px 5px">Tools Run</td>      <td>{int(m['total_tools'])}</td></tr>
                             <tr><td style="padding:2px 5px">MTBF</td>           <td>{m['avg_mtbf']:.0f} min</td></tr>
                             <tr><td style="padding:2px 5px">MTTR</td>           <td>{m['avg_mttr']:.1f} min</td></tr>
-                            <tr><td style="padding:2px 5px">Improvement</td>    <td>{m['avg_improvement']:+.1f} pp</td></tr>
+                            <tr><td style="padding:2px 5px">Best Machine</td>   <td>{m['best_machine']}</td></tr>
+                            <tr><td style="padding:2px 5px">Worst Machine</td>  <td>{m['worst_machine']}</td></tr>
                             </table>
                         </div>""", unsafe_allow_html=True)
 
-            st.markdown("#### Full Machine Scorecard")
+            st.markdown("#### Supplier Scorecard")
 
-            disp_cols = ['overall_rank', 'machine_id']
-            meta_order = ['Plant ID', 'Line', 'Machine Maker', 'Machine Tonnage (ton)']
-            disp_cols += [c for c in meta_order if c in sc_view.columns]
-            disp_cols += ['total_tools', 'total_runs', 'total_parts', 'production_hrs',
-                          'avg_fit_score', 'avg_cap_eff', 'avg_stability', 'avg_efficiency',
-                          'avg_improvement', 'avg_mtbf', 'avg_mttr',
-                          'total_slow_loss', 'total_fast_gain']
-            if 'plant_rank' in sc_view.columns:
-                disp_cols.insert(2, 'plant_rank')
-
-            sc_display = sc_view[[c for c in disp_cols if c in sc_view.columns]].rename(columns={
-                'overall_rank': '# Overall', 'plant_rank': '# In Plant',
-                'machine_id': 'Machine', 'total_tools': 'Tools',
+            sc_display = scorecard.rename(columns={
+                'rank': '#', 'supplier_id': 'Supplier',
+                'total_tools': 'Tools', 'total_machines': 'Machines',
                 'total_runs': 'Runs', 'total_parts': 'Parts',
                 'production_hrs': 'Prod Hrs', 'avg_fit_score': 'Fit Score',
                 'avg_cap_eff': 'Cap Eff %', 'avg_stability': 'Stability %',
-                'avg_efficiency': 'Efficiency %', 'avg_improvement': 'Improvement (pp)',
+                'avg_efficiency': 'Efficiency %',
                 'avg_mtbf': 'MTBF (min)', 'avg_mttr': 'MTTR (min)',
                 'total_slow_loss': 'Slow Loss', 'total_fast_gain': 'Fast Gain',
-                'Plant ID': 'Plant', 'Machine Maker': 'Maker',
-                'Machine Tonnage (ton)': 'Tonnage',
+                'best_machine': 'Best Machine', 'worst_machine': 'Worst Machine',
             })
 
-            def _style_scorecard(row):
+            def _style_sc(row):
                 styles = [''] * len(row)
                 for i, col in enumerate(sc_display.columns):
                     if col == 'Fit Score':
@@ -1723,136 +1699,227 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                         if v >= 90:   styles[i] = f'color:{C["green"]}'
                         elif v >= 75: styles[i] = f'color:{C["orange"]}'
                         else:         styles[i] = f'color:{C["red"]}'
-                    elif col == 'Improvement (pp)':
-                        v = row[col]
-                        styles[i] = f'color:{C["green"]}' if v > 0 else (f'color:{C["red"]}' if v < 0 else '')
                 return styles
 
             st.dataframe(
-                sc_display.style.apply(_style_scorecard, axis=1).format(precision=1, na_rep='—'),
+                sc_display.style.apply(_style_sc, axis=1).format(precision=1, na_rep='—'),
                 use_container_width=True, hide_index=True
             )
 
-            # ── Plant pivot ───────────────────────────────────────────────────
-            if 'Plant' in sc_display.columns:
-                st.markdown("#### Pivot: Plant × Metric")
-                pivot_metric = st.selectbox(
-                    "Metric for pivot", ['Fit Score', 'Cap Eff %', 'Stability %', 'Parts', 'Prod Hrs'],
-                    key=f"ov_pivot_metric{key_suffix}"
-                )
-                pivot_df = pd.pivot_table(
-                    sc_display, values=pivot_metric,
-                    index='Plant', aggfunc='mean'
-                ).round(1)
-                st.dataframe(pivot_df, use_container_width=True)
+            # ── Pivot: Supplier × Machine ─────────────────────────────────────
+            st.markdown("#### Pivot: Supplier × Machine")
+            st.caption("Average fit score for each supplier's tools on each machine.")
+            pv_sup = pd.pivot_table(
+                fit_df, values='fit_score',
+                index='supplier_id', columns='machine_id', aggfunc='mean'
+            ).round(1)
+            st.dataframe(pv_sup, use_container_width=True)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 2 — TOOL-MACHINE RANKINGS
+    # TAB 2 — MACHINE-CENTRIC RANKINGS
     # ══════════════════════════════════════════════════════════════════════════
     with sub_rankings:
-        st.subheader("Tool Performance by Machine")
-        st.caption("Each row = one tool-machine combination. "
-                   "Improvement Rate = cap efficiency delta between first-half and second-half runs (positive = getting better).")
-
-        # ── Filters ───────────────────────────────────────────────────────────
-        fc1, fc2, fc3, fc4 = st.columns([2, 2, 1, 1])
-        all_tools    = sorted(fit_df['tool_id'].unique())
-        all_machines = sorted(fit_df['machine_id'].unique())
-
-        with fc1:
-            scope = st.radio("Tool scope", ["All", "Copy Tools", "Single Tools"],
-                             horizontal=True, key=f"rk_scope{key_suffix}")
-        with fc2:
-            machine_filter = st.multiselect("Filter Machines", all_machines,
-                                            default=[], key=f"rk_machine{key_suffix}")
-        with fc3:
-            min_runs_rk = st.number_input("Min Runs", 1, value=1, key=f"rk_minruns{key_suffix}")
-        with fc4:
-            sort_col = st.selectbox("Sort by", ['fit_score', 'cap_efficiency_pct',
-                                                'improvement_rate', 'production_hrs',
-                                                'total_parts', 'stability_pct', 'mtbf_min'],
-                                    key=f"rk_sort{key_suffix}")
-
-        rk_df = fit_df.copy()
-        if scope == "Copy Tools":
-            rk_df = rk_df[rk_df['tool_id'].isin(copy_map.keys())]
-        elif scope == "Single Tools":
-            rk_df = rk_df[~rk_df['tool_id'].isin(copy_map.keys())]
-        if machine_filter:
-            rk_df = rk_df[rk_df['machine_id'].isin(machine_filter)]
-        rk_df = rk_df[rk_df['runs'] >= min_runs_rk].sort_values(sort_col, ascending=False).reset_index(drop=True)
-
-        rk_df['copy_group'] = rk_df['tool_id'].map(copy_map).fillna('—')
-        rk_df['rank'] = range(1, len(rk_df) + 1)
-        rk_df['improvement_label'] = rk_df['improvement_rate'].apply(
-            lambda v: f"▲ +{v:.1f} pp" if (pd.notna(v) and v > 0)
-                 else (f"▼ {v:.1f} pp" if (pd.notna(v) and v < 0) else "— n/a")
+        st.subheader("Tool Rankings by Machine")
+        st.caption(
+            "Select a machine to see how every tool that has run on it compares. "
+            "**vs Best** shows how far each tool is behind the top performer on this machine. "
+            "**Parts Gain/hr** is how many more parts per hour this machine would produce "
+            "if it ran the best tool instead of this one."
         )
 
-        display_rk = rk_df[[
-            'rank', 'tool_id', 'copy_group', 'machine_id', 'runs',
-            'production_hrs', 'total_parts',
-            'fit_score', 'cap_efficiency_pct', 'stability_pct', 'efficiency_pct',
-            'improvement_label', 'avg_ct_sec', 'ct_fluctuation_pct',
-            'slow_loss_parts', 'fast_gain_parts', 'mtbf_min', 'mttr_min',
-        ]].rename(columns={
-            'rank': '#', 'tool_id': 'Tool', 'copy_group': 'Copy Group',
-            'machine_id': 'Machine', 'runs': 'Runs',
-            'production_hrs': 'Prod Hrs', 'total_parts': 'Parts',
-            'fit_score': 'Fit Score', 'cap_efficiency_pct': 'Cap Eff %',
-            'stability_pct': 'Stability %', 'efficiency_pct': 'Efficiency %',
-            'improvement_label': 'Improvement', 'avg_ct_sec': 'Avg CT (s)',
-            'ct_fluctuation_pct': 'CT Fluctuation%',
-            'slow_loss_parts': 'Slow Loss', 'fast_gain_parts': 'Fast Gain',
-            'mtbf_min': 'MTBF (min)', 'mttr_min': 'MTTR (min)',
-        })
+        all_machines_rk = sorted(fit_df['machine_id'].unique())
+        sel_machine = st.selectbox("Select Machine", all_machines_rk, key=f"rk_machine_sel{key_suffix}")
 
-        def _style_rk(row):
-            styles = [''] * len(row)
-            for i, col in enumerate(display_rk.columns):
-                if col == 'Fit Score':
-                    v = row[col]
-                    if v >= 70:   styles[i] = f'color:{C["green"]};font-weight:bold'
-                    elif v >= 45: styles[i] = f'color:{C["orange"]}'
-                    else:         styles[i] = f'color:{C["red"]}'
-                elif col in ('Cap Eff %', 'Stability %', 'Efficiency %'):
-                    v = row[col]
-                    if v >= 90:   styles[i] = f'color:{C["green"]}'
-                    elif v >= 75: styles[i] = f'color:{C["orange"]}'
-                    else:         styles[i] = f'color:{C["red"]}'
-                elif col == 'Improvement':
-                    styles[i] = f'color:{C["green"]}' if '▲' in str(row[col]) else (
-                                 f'color:{C["red"]}'   if '▼' in str(row[col]) else '')
-            return styles
+        mach_rankings = cr_CG_utils.compute_machine_tool_rankings(fit_df)
+        mach_view = mach_rankings[mach_rankings['machine_id'] == sel_machine].copy()
 
-        st.dataframe(
-            display_rk.style.apply(_style_rk, axis=1).format(
-                {c: '{:.1f}' for c in ['Fit Score','Cap Eff %','Stability %','Efficiency %',
-                                        'Avg CT (s)','CT Fluctuation%','MTBF (min)','MTTR (min)']},
-                na_rep='—'
-            ),
-            use_container_width=True, hide_index=True, height=480
-        )
+        if mach_view.empty:
+            st.warning("No tool data for this machine.")
+        else:
+            # ── Summary strip ─────────────────────────────────────────────────
+            best_r  = mach_view.iloc[0]
+            worst_r = mach_view.iloc[-1]
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("Tools Compared",     f"{len(mach_view)}")
+            s2.metric("Best Tool",          best_r['tool_id'],
+                      f"{best_r['cap_efficiency_pct']:.1f}% Cap Eff")
+            s3.metric("Cap Eff Spread",     f"{(best_r['cap_efficiency_pct'] - worst_r['cap_efficiency_pct']):.1f} pp",
+                      help="Difference between best and worst tool on this machine")
+            s4.metric("Max Parts Gain/hr",  f"{mach_view['parts_gain_potential'].max():,.1f}",
+                      help="Parts per hour gained if worst tool replaced by best")
 
-        # ── Pivot: Tool × Machine for selected metric ─────────────────────────
-        st.markdown("#### Pivot: Tool × Machine")
-        pv_metric = st.selectbox(
-            "Metric", ['fit_score', 'cap_efficiency_pct', 'stability_pct',
-                       'production_hrs', 'total_parts', 'improvement_rate'],
-            format_func=lambda x: {
-                'fit_score': 'Fit Score', 'cap_efficiency_pct': 'Cap Efficiency %',
-                'stability_pct': 'Stability %', 'production_hrs': 'Production Hours',
-                'total_parts': 'Total Parts', 'improvement_rate': 'Improvement Rate (pp)',
-            }.get(x, x),
-            key=f"rk_pv_metric{key_suffix}"
-        )
-        if not rk_df.empty:
+            st.markdown("---")
+
+            mach_view['copy_group'] = mach_view['tool_id'].map(copy_map).fillna('—')
+            mach_view['vs_best_label'] = mach_view['vs_best_pct'].apply(
+                lambda v: f"—" if v == 0 else f"{v:+.1f} pp"
+            )
+
+            disp = mach_view[[
+                'rank_on_machine', 'tool_id', 'copy_group', 'supplier_id',
+                'runs', 'production_hrs', 'total_parts',
+                'cap_efficiency_pct', 'stability_pct', 'fit_score',
+                'vs_best_label', 'parts_gain_potential',
+                'avg_ct_sec', 'ct_fluctuation_pct', 'mtbf_min', 'mttr_min',
+            ]].rename(columns={
+                'rank_on_machine': '#', 'tool_id': 'Tool', 'copy_group': 'Copy Group',
+                'supplier_id': 'Supplier', 'runs': 'Runs',
+                'production_hrs': 'Prod Hrs', 'total_parts': 'Parts',
+                'cap_efficiency_pct': 'Cap Eff %', 'stability_pct': 'Stability %',
+                'fit_score': 'Fit Score', 'vs_best_label': 'vs Best',
+                'parts_gain_potential': 'Parts Gain/hr',
+                'avg_ct_sec': 'Avg CT (s)', 'ct_fluctuation_pct': 'CT Fluctuation%',
+                'mtbf_min': 'MTBF (min)', 'mttr_min': 'MTTR (min)',
+            })
+
+            def _style_mach_rk(row):
+                styles = [''] * len(row)
+                for i, col in enumerate(disp.columns):
+                    if col == 'Cap Eff %':
+                        v = row[col]
+                        if v >= 90:   styles[i] = f'color:{C["green"]};font-weight:bold'
+                        elif v >= 75: styles[i] = f'color:{C["orange"]}'
+                        else:         styles[i] = f'color:{C["red"]}'
+                    elif col == 'vs Best':
+                        styles[i] = '' if row[col] == '—' else f'color:{C["red"]}'
+                    elif col == 'Parts Gain/hr':
+                        v = row[col]
+                        styles[i] = '' if v == 0 else (f'color:{C["orange"]}' if v > 0 else '')
+                return styles
+
+            st.dataframe(
+                disp.style.apply(_style_mach_rk, axis=1).format(
+                    {c: '{:.1f}' for c in ['Cap Eff %','Stability %','Fit Score',
+                                            'Parts Gain/hr','Avg CT (s)','CT Fluctuation%',
+                                            'MTBF (min)','MTTR (min)']},
+                    na_rep='—'
+                ),
+                use_container_width=True, hide_index=True
+            )
+
+            # ── Pivot: All machines × all tools ───────────────────────────────
+            st.markdown("#### Pivot: All Machines × All Tools (Cap Efficiency %)")
+            st.caption("Blank = that tool has not run on that machine.")
             pv = pd.pivot_table(
-                fit_df[fit_df['tool_id'].isin(rk_df['tool_id'])],
-                values=pv_metric, index='tool_id', columns='machine_id',
-                aggfunc='mean'
+                fit_df, values='cap_efficiency_pct',
+                index='machine_id', columns='tool_id', aggfunc='mean'
             ).round(1)
             st.dataframe(pv, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 3 — RECOMMENDATIONS
+    # ══════════════════════════════════════════════════════════════════════════
+    with sub_recs:
+        st.subheader("Best Match Recommendations")
+        st.caption(
+            "For each machine, the best-performing tool is identified. "
+            "Where a tool from a different supplier outperforms the current supplier's tool, "
+            "a **cross-supplier swap** is flagged with the quantified parts-per-hour gain."
+        )
+
+        recs_df = cr_CG_utils.compute_recommendations(fit_df)
+
+        if recs_df.empty:
+            st.warning("Not enough cross-supplier data to generate recommendations.")
+        else:
+            # ── KPI strip ─────────────────────────────────────────────────────
+            swap_count = recs_df['swap_recommended'].sum()
+            total_gain = recs_df['parts_gain_best_vs_worst'].sum()
+            swap_gain  = recs_df[recs_df['swap_recommended']]['swap_parts_per_hr_gain'].sum()
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Machines Analysed",        f"{len(recs_df)}")
+            r2.metric("Swap Opportunities Found",  f"{int(swap_count)}")
+            r3.metric("Total Swap Gain Potential", f"{swap_gain:,.1f} parts/hr",
+                      help="Sum of parts/hr gained if all recommended swaps were actioned")
+
+            st.markdown("---")
+
+            # ── Swap opportunities ─────────────────────────────────────────────
+            swaps = recs_df[recs_df['swap_recommended']].copy()
+            if swaps.empty:
+                st.info("No cross-supplier swap opportunities identified with current data.")
+            else:
+                st.markdown("#### 🔄 Cross-Supplier Swap Opportunities")
+                st.caption(
+                    "These machines have a tool from a different supplier that outperforms "
+                    "the current supplier's tool. Routing the better-matched tool to this machine "
+                    "would yield the stated parts-per-hour gain."
+                )
+                for _, row in swaps.iterrows():
+                    gain_color = C['green'] if row['swap_parts_per_hr_gain'] > 0 else C['orange']
+                    st.markdown(f"""
+                    <div style="background:#1a1a2e;border-left:4px solid {gain_color};
+                                border-radius:6px;padding:14px;margin-bottom:10px">
+                        <b style="font-size:1.05em">Machine: {row['machine_id']}</b>
+                        &nbsp;&nbsp;
+                        <span style="color:{gain_color};font-weight:bold">
+                            +{row['swap_parts_per_hr_gain']:.1f} parts/hr gain
+                        </span>
+                        &nbsp;|&nbsp;
+                        <span style="color:{C['blue']}">
+                            +{row['swap_cap_eff_gain']:.1f} pp cap efficiency
+                        </span>
+                        <br><br>
+                        <table style="width:100%;font-size:0.85em;border-collapse:collapse">
+                        <tr style="color:#aaa">
+                            <td style="padding:3px 10px"><b>Current best</b></td>
+                            <td style="padding:3px 10px"><b>Recommended swap</b></td>
+                        </tr>
+                        <tr>
+                            <td style="padding:3px 10px">
+                                Tool: <b>{row['best_tool']}</b> ({row['best_supplier']})<br>
+                                Cap Eff: {row['best_cap_eff']:.1f}%<br>
+                                Parts/hr: {row['best_parts_per_hr']:.1f}
+                            </td>
+                            <td style="padding:3px 10px">
+                                Move tool: <b>{row['swap_tool']}</b>
+                                from <b>{row['swap_from_supplier']}</b>
+                                → run on this machine<br>
+                                Supplier: <b>{row['swap_to_supplier']}</b><br>
+                                Cap Eff gain: <b style="color:{gain_color}">
+                                    +{row['swap_cap_eff_gain']:.1f} pp</b>
+                            </td>
+                        </tr>
+                        </table>
+                    </div>""", unsafe_allow_html=True)
+
+            st.markdown("#### All Machine Best Matches")
+            best_display = recs_df[[
+                'machine_id', 'best_tool', 'best_supplier', 'best_cap_eff',
+                'best_parts_per_hr', 'worst_tool', 'worst_supplier', 'worst_cap_eff',
+                'tools_compared', 'cap_eff_spread', 'parts_gain_best_vs_worst',
+                'swap_recommended', 'swap_tool', 'swap_to_supplier',
+                'swap_cap_eff_gain', 'swap_parts_per_hr_gain',
+            ]].rename(columns={
+                'machine_id': 'Machine', 'best_tool': 'Best Tool',
+                'best_supplier': 'Best Supplier', 'best_cap_eff': 'Best Cap Eff %',
+                'best_parts_per_hr': 'Best Parts/hr',
+                'worst_tool': 'Worst Tool', 'worst_supplier': 'Worst Supplier',
+                'worst_cap_eff': 'Worst Cap Eff %', 'tools_compared': 'Tools Compared',
+                'cap_eff_spread': 'Spread (pp)', 'parts_gain_best_vs_worst': 'Gain Potential (parts/hr)',
+                'swap_recommended': 'Swap?', 'swap_tool': 'Swap Tool',
+                'swap_to_supplier': 'From Supplier',
+                'swap_cap_eff_gain': 'Swap Cap Gain (pp)',
+                'swap_parts_per_hr_gain': 'Swap Parts Gain/hr',
+            })
+
+            def _style_recs(row):
+                styles = [''] * len(row)
+                for i, col in enumerate(best_display.columns):
+                    if col == 'Swap?':
+                        styles[i] = f'color:{C["green"]};font-weight:bold' if row[col] else ''
+                    elif col in ('Spread (pp)', 'Gain Potential (parts/hr)'):
+                        v = row[col]
+                        styles[i] = f'color:{C["orange"]}' if v > 5 else ''
+                    elif col in ('Swap Cap Gain (pp)', 'Swap Parts Gain/hr'):
+                        v = row[col]
+                        styles[i] = f'color:{C["green"]}' if v > 0 else ''
+                return styles
+
+            st.dataframe(
+                best_display.style.apply(_style_recs, axis=1).format(precision=1, na_rep='—'),
+                use_container_width=True, hide_index=True
+            )
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 3 — DEEP DIVE
@@ -1914,7 +1981,7 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                         <span style="font-size:0.78em">Stability: {row['stability_pct']:.1f}%</span><br>
                         <span style="font-size:0.78em">Prod Hrs: {row['production_hrs']:,.0f}</span><br>
                         <span style="font-size:0.78em">Parts: {row['total_parts']:,.0f}</span><br>
-                        <span style="font-size:0.78em;color:{imp_color}">Improvement: {imp_str}</span>
+                        <span style="font-size:0.78em;color:{imp_color}" title="Performance trend: cap efficiency of recent runs vs early runs on this machine. Positive = improving over time.">Trend: {imp_str}</span>
                     </div>""", unsafe_allow_html=True)
 
             # ── Heatmap ───────────────────────────────────────────────────────
@@ -1937,7 +2004,7 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                 'machine_id':'Machine','fit_score':'Fit Score','runs':'Runs',
                 'production_hrs':'Prod Hrs','total_parts':'Parts',
                 'cap_efficiency_pct':'Cap Eff %','stability_pct':'Stability %',
-                'efficiency_pct':'Efficiency %','improvement_rate':'Improvement (pp)',
+                'efficiency_pct':'Efficiency %','improvement_rate':'Perf Trend (pp)',
                 'avg_ct_sec':'Avg CT (s)','ct_fluctuation_pct':'CT Fluctuation%',
                 'slow_loss_parts':'Slow Loss','fast_gain_parts':'Fast Gain',
                 'mtbf_min':'MTBF (min)','mttr_min':'MTTR (min)',
