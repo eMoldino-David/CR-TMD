@@ -2321,10 +2321,165 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
             )
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 4 — PART DEEP DIVE
+    # TAB 4 — PART ANALYSIS
     # ══════════════════════════════════════════════════════════════════════════
     with sub_deepdive:
-        st.subheader("Part Deep Dive")
+        st.subheader("Part Analysis")
+
+        all_groups_dd = sorted({v for v in copy_map.values() if v})
+        all_tools_dd  = sorted(fit_df['tool_id'].unique())
+
+        if all_groups_dd:
+            dd_part = st.selectbox("Select Part", all_groups_dd, key=f"dd_part{key_suffix}")
+            dd_tool_ids = [t for t in all_tools_dd if copy_map.get(t) == dd_part]
+        else:
+            dd_part = st.selectbox("Select Tool", all_tools_dd, key=f"dd_part{key_suffix}")
+            dd_tool_ids = [dd_part]
+
+        # ── Date range slider ─────────────────────────────────────────────────
+        if not df_processed_global.empty and 'shot_time' in df_processed_global.columns:
+            part_proc_all = df_processed_global[
+                df_processed_global['tool_id'].isin(dd_tool_ids)
+            ]
+            if not part_proc_all.empty:
+                date_min = part_proc_all['shot_time'].min().date()
+                date_max = part_proc_all['shot_time'].max().date()
+                if date_min < date_max:
+                    dd_range = st.slider(
+                        "Date Range", min_value=date_min, max_value=date_max,
+                        value=(date_min, date_max), key=f"dd_range{key_suffix}",
+                        format="DD MMM YYYY"
+                    )
+                    date_from = pd.Timestamp(dd_range[0])
+                    date_to   = pd.Timestamp(dd_range[1]) + pd.Timedelta(days=1)
+                    part_proc = df_processed_global[
+                        df_processed_global['tool_id'].isin(dd_tool_ids) &
+                        (df_processed_global['shot_time'] >= date_from) &
+                        (df_processed_global['shot_time'] <  date_to)
+                    ].copy()
+                    # Filter fit_df to sessions that overlap the date range
+                    valid_sessions = part_proc['session_id'].dropna().unique() if 'session_id' in part_proc.columns else []
+                    dd_fit = fit_df[fit_df['tool_id'].isin(dd_tool_ids)].copy()
+                else:
+                    part_proc = part_proc_all.copy()
+                    dd_fit    = fit_df[fit_df['tool_id'].isin(dd_tool_ids)].copy()
+            else:
+                part_proc = pd.DataFrame()
+                dd_fit    = fit_df[fit_df['tool_id'].isin(dd_tool_ids)].copy()
+        else:
+            part_proc = pd.DataFrame()
+            dd_fit    = fit_df[fit_df['tool_id'].isin(dd_tool_ids)].copy()
+
+        if not dd_tool_ids:
+            st.warning("No data for this part.")
+        elif dd_fit.empty:
+            st.warning("No machine data found for this part.")
+        else:
+            SEVERITY_COLOR = {'high': C['red'], 'medium': C['orange'], 'info': C['blue']}
+            SEVERITY_ICON  = {'high': '🔴', 'medium': '🟡', 'info': '🔵'}
+
+            # ── Analysis Engine ───────────────────────────────────────────────
+            st.markdown("#### 🔍 Automated Insights")
+            with st.spinner("Running analysis…"):
+                insights = cr_CG_utils.run_part_analysis(
+                    fit_df=dd_fit,
+                    df_processed=part_proc,
+                    tool_ids=dd_tool_ids,
+                    part_name=dd_part,
+                    copy_map=copy_map,
+                )
+
+            if not insights:
+                st.info("No significant patterns detected for this part in the selected date range.")
+            else:
+                for ins in insights:
+                    color  = SEVERITY_COLOR.get(ins['severity'], C['blue'])
+                    icon   = SEVERITY_ICON.get(ins['severity'], '🔵')
+                    rule   = ins['rule'].replace('_', ' ').title()
+                    st.markdown(f"""
+                    <div style="background:#1a1a2e;border-left:4px solid {color};
+                                border-radius:6px;padding:12px 16px;margin-bottom:8px">
+                        <span style="font-size:0.75em;color:{color};text-transform:uppercase;
+                                     letter-spacing:0.05em">{icon} {rule}</span><br>
+                        <b style="font-size:0.95em">{ins['title']}</b><br>
+                        <span style="font-size:0.85em;color:#ccc">{ins['detail']}</span>
+                    </div>""", unsafe_allow_html=True)
+
+            st.markdown("---")
+
+            # ── Performance Heatmap ───────────────────────────────────────────
+            st.markdown("#### Performance Heatmap — Machine × Tool")
+            st.caption("Cap efficiency for each tool on each machine. Green = better. Blank = not yet tested.")
+            pv_hm = pd.pivot_table(
+                dd_fit, values='cap_efficiency_pct',
+                index='machine_id', columns='tool_id', aggfunc='mean'
+            ).round(0)
+            st.dataframe(
+                pv_hm.style
+                    .background_gradient(cmap='RdYlGn', axis=None, vmin=70, vmax=105)
+                    .format('{:.0f}%', na_rep=''),
+                use_container_width=True
+            )
+
+            st.markdown("---")
+
+            # ── Performance by Shift ──────────────────────────────────────────
+            if 'session_period' in df_processed_global.columns and not part_proc.empty:
+                shift_cfg = st.session_state.get('shift_config',
+                    [("Shift 1",6,14),("Shift 2",14,22),("Shift 3",22,6)])
+                shift_label = " · ".join(
+                    f"{n} {s:02d}:00–{e:02d}:00" for n,s,e in shift_cfg
+                )
+                st.markdown("#### Performance by Shift — Machine × Tool")
+                st.caption(shift_label)
+
+                if 'machine_id' in part_proc.columns:
+                    shift_rows = []
+                    for (tid, mid, period), grp in part_proc.groupby(
+                        ['tool_id','machine_id','session_period']
+                    ):
+                        prod = grp[grp['stop_flag'] == 0]
+                        dur  = (grp['shot_time'].max() - grp['shot_time'].min()).total_seconds()
+                        if dur <= 0: continue
+                        rct  = float(grp['approved_ct_for_run'].iloc[0]) if 'approved_ct_for_run' in grp.columns else float(grp['approved_ct'].iloc[0])
+                        rcav = float(grp['working_cavities'].max()) if 'working_cavities' in grp.columns else 1.0
+                        opt  = (dur / rct) * rcav if rct > 0 else 0
+                        act  = float(prod['working_cavities'].sum()) if 'working_cavities' in prod.columns else float(len(prod))
+                        shift_rows.append({
+                            'pairing':        f"{tid} / {mid}",
+                            'session_period': period,
+                            'cap_eff':        round(act / opt * 100, 0) if opt > 0 else None,
+                            'parts_per_hr':   round(act / (dur / 3600), 0) if dur > 0 else None,
+                        })
+
+                    if shift_rows:
+                        shift_df = pd.DataFrame(shift_rows)
+                        sv1, sv2 = st.tabs(["Cap Efficiency %", "Parts per Hour"])
+
+                        with sv1:
+                            pv_eff = pd.pivot_table(
+                                shift_df, values='cap_eff',
+                                index='pairing', columns='session_period', aggfunc='mean'
+                            ).round(0)
+                            st.dataframe(
+                                pv_eff.style
+                                    .background_gradient(cmap='RdYlGn', axis=None, vmin=70, vmax=105)
+                                    .format('{:.0f}%', na_rep='—'),
+                                use_container_width=True
+                            )
+                        with sv2:
+                            pv_pph = pd.pivot_table(
+                                shift_df, values='parts_per_hr',
+                                index='pairing', columns='session_period', aggfunc='mean'
+                            ).round(0)
+                            st.dataframe(
+                                pv_pph.style
+                                    .background_gradient(cmap='RdYlGn', axis=None)
+                                    .format('{:.0f}', na_rep='—'),
+                                use_container_width=True
+                            )
+            elif 'session_period' not in df_processed_global.columns:
+                st.caption("Upload TMD log to enable shift breakdown.")
 
         all_groups_dd = sorted({v for v in copy_map.values() if v})
         all_tools_dd  = sorted(fit_df['tool_id'].unique())
@@ -2336,95 +2491,6 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
             # No copy groups — fall back to individual tool
             dd_part = st.selectbox("Select Tool", all_tools_dd, key=f"dd_part{key_suffix}")
             dd_tool_ids = [dd_part]
-
-        if not dd_tool_ids:
-            st.warning("No data for this part.")
-        else:
-            dd_fit = fit_df[fit_df['tool_id'].isin(dd_tool_ids)].copy()
-
-            if dd_fit.empty:
-                st.warning("No machine data found for this part.")
-            else:
-                # ── Heatmap: machine × tool pairing ──────────────────────────
-                st.markdown("#### Performance Heatmap — Machine × Tool")
-                st.caption("Cap efficiency for each tool on each machine. Green = better. Blank = not yet tested.")
-                pv_hm = pd.pivot_table(
-                    dd_fit, values='cap_efficiency_pct',
-                    index='machine_id', columns='tool_id', aggfunc='mean'
-                ).round(0)
-                st.dataframe(
-                    pv_hm.style
-                        .background_gradient(cmap='RdYlGn', axis=None, vmin=70, vmax=105)
-                        .format('{:.0f}%', na_rep=''),
-                    use_container_width=True
-                )
-
-                st.markdown("---")
-
-                # ── Performance by Shift: machine × tool pairing ─────────────
-                if 'session_period' in df_processed_global.columns:
-                    shift_cfg = st.session_state.get('shift_config',
-                        [("Shift 1",6,14),("Shift 2",14,22),("Shift 3",22,6)])
-                    shift_label = " · ".join(
-                        f"{n} {s:02d}:00–{e:02d}:00" for n,s,e in shift_cfg
-                    )
-                    st.markdown("#### Performance by Shift — Machine × Tool")
-                    st.caption(shift_label)
-
-                    part_sessions = df_processed_global[
-                        df_processed_global['tool_id'].isin(dd_tool_ids)
-                    ].copy()
-
-                    if not part_sessions.empty and 'machine_id' in part_sessions.columns:
-                        shift_rows = []
-                        for (tid, mid, period), grp in part_sessions.groupby(
-                            ['tool_id', 'machine_id', 'session_period']
-                        ):
-                            prod = grp[grp['stop_flag'] == 0]
-                            dur  = (grp['shot_time'].max() - grp['shot_time'].min()).total_seconds()
-                            if dur <= 0:
-                                continue
-                            rct  = float(grp['approved_ct_for_run'].iloc[0]) if 'approved_ct_for_run' in grp.columns else float(grp['approved_ct'].iloc[0])
-                            rcav = float(grp['working_cavities'].max()) if 'working_cavities' in grp.columns else 1.0
-                            opt  = (dur / rct) * rcav if rct > 0 else 0
-                            act  = float(prod['working_cavities'].sum()) if 'working_cavities' in prod.columns else float(len(prod))
-                            shift_rows.append({
-                                'pairing':        f"{tid} / {mid}",
-                                'session_period': period,
-                                'cap_eff':        round(act / opt * 100, 0) if opt > 0 else None,
-                                'parts_per_hr':   round(act / (dur / 3600), 0) if dur > 0 else None,
-                            })
-
-                        if shift_rows:
-                            shift_df = pd.DataFrame(shift_rows)
-                            sv1, sv2 = st.tabs(["Cap Efficiency %", "Parts per Hour"])
-
-                            with sv1:
-                                pv_eff = pd.pivot_table(
-                                    shift_df, values='cap_eff',
-                                    index='pairing', columns='session_period', aggfunc='mean'
-                                ).round(0)
-                                st.dataframe(
-                                    pv_eff.style
-                                        .background_gradient(cmap='RdYlGn', axis=None, vmin=70, vmax=105)
-                                        .format('{:.0f}%', na_rep='—'),
-                                    use_container_width=True
-                                )
-
-                            with sv2:
-                                pv_pph = pd.pivot_table(
-                                    shift_df, values='parts_per_hr',
-                                    index='pairing', columns='session_period', aggfunc='mean'
-                                ).round(0)
-                                st.dataframe(
-                                    pv_pph.style
-                                        .background_gradient(cmap='RdYlGn', axis=None)
-                                        .format('{:.0f}', na_rep='—'),
-                                    use_container_width=True
-                                )
-                    else:
-                        st.caption("Upload TMD log to enable shift breakdown.")
-
 
 if __name__ == "__main__":
     main()

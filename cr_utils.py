@@ -2481,3 +2481,288 @@ def generate_weekly_report(fit_df: pd.DataFrame,
 
     wb.save(output)
     return output.getvalue()
+
+
+# ==============================================================================
+# --- PART ANALYSIS ENGINE ---
+# ==============================================================================
+
+def run_part_analysis(
+    fit_df: pd.DataFrame,
+    df_processed: pd.DataFrame,
+    tool_ids: list,
+    part_name: str,
+    copy_map: dict = None,
+) -> list:
+    """
+    Rules-based analysis engine for a part (one or more copy tools).
+    Returns a list of insight dicts:
+        {
+            'rule':     str,   # rule name
+            'severity': str,   # 'high' | 'medium' | 'info'
+            'title':    str,   # one-line summary
+            'detail':   str,   # explanation with numbers
+        }
+    """
+    insights = []
+    if fit_df.empty or not tool_ids:
+        return insights
+
+    part_fit = fit_df[fit_df['tool_id'].isin(tool_ids)].copy()
+    if part_fit.empty:
+        return insights
+
+    # ── 1. Consistency flag ───────────────────────────────────────────────────
+    for tid, tgrp in part_fit.groupby('tool_id'):
+        if len(tgrp) < 2:
+            continue
+        cap_range = tgrp['cap_efficiency_pct'].max() - tgrp['cap_efficiency_pct'].min()
+        best_m  = tgrp.loc[tgrp['cap_efficiency_pct'].idxmax(), 'machine_id']
+        worst_m = tgrp.loc[tgrp['cap_efficiency_pct'].idxmin(), 'machine_id']
+        best_v  = tgrp['cap_efficiency_pct'].max()
+        worst_v = tgrp['cap_efficiency_pct'].min()
+        if cap_range > 15:
+            insights.append({
+                'rule': 'consistency',
+                'severity': 'high',
+                'title': f"{tid} — High machine-dependency ({cap_range:.0f} pp spread)",
+                'detail': (
+                    f"{tid} performs very differently depending on which machine it runs on. "
+                    f"Best: {best_m} at {best_v:.0f}%, worst: {worst_m} at {worst_v:.0f}%. "
+                    f"A {cap_range:.0f} pp spread suggests the tool is sensitive to press conditions. "
+                    f"Prioritise running on {best_m}."
+                ),
+            })
+        elif cap_range > 7:
+            insights.append({
+                'rule': 'consistency',
+                'severity': 'medium',
+                'title': f"{tid} — Moderate machine sensitivity ({cap_range:.0f} pp spread)",
+                'detail': (
+                    f"{tid} shows a {cap_range:.0f} pp range across machines "
+                    f"({best_m}: {best_v:.0f}% → {worst_m}: {worst_v:.0f}%). "
+                    f"Worth prioritising {best_m} for scheduling."
+                ),
+            })
+
+    # ── 2. Shift degradation ──────────────────────────────────────────────────
+    if (not df_processed.empty
+            and 'session_period' in df_processed.columns
+            and 'machine_id' in df_processed.columns):
+
+        part_proc = df_processed[df_processed['tool_id'].isin(tool_ids)].copy()
+
+        def _cap_eff_for_group(grp):
+            prod = grp[grp['stop_flag'] == 0]
+            dur  = (grp['shot_time'].max() - grp['shot_time'].min()).total_seconds()
+            if dur <= 0: return None
+            rct  = float(grp['approved_ct_for_run'].iloc[0]) if 'approved_ct_for_run' in grp.columns else float(grp['approved_ct'].iloc[0])
+            rcav = float(grp['working_cavities'].max()) if 'working_cavities' in grp.columns else 1.0
+            opt  = (dur / rct) * rcav if rct > 0 else 0
+            act  = float(prod['working_cavities'].sum()) if 'working_cavities' in prod.columns else float(len(prod))
+            return round(act / opt * 100, 1) if opt > 0 else None
+
+        if not part_proc.empty:
+            shift_effs = {}
+            for (tid, mid, period), grp in part_proc.groupby(['tool_id','machine_id','session_period']):
+                v = _cap_eff_for_group(grp)
+                if v is not None:
+                    shift_effs.setdefault((tid, mid), {})[period] = v
+
+            for (tid, mid), periods in shift_effs.items():
+                if len(periods) < 2:
+                    continue
+                vals = list(periods.values())
+                max_v = max(vals); min_v = min(vals)
+                max_s = max(periods, key=periods.get)
+                min_s = min(periods, key=periods.get)
+                drop = max_v - min_v
+                if drop > 10:
+                    insights.append({
+                        'rule': 'shift_degradation',
+                        'severity': 'high',
+                        'title': f"{tid} / {mid} — Shift degradation detected ({drop:.0f} pp)",
+                        'detail': (
+                            f"{tid} on {mid} drops {drop:.0f} pp between best and worst shift. "
+                            f"Peak: {max_s} at {max_v:.0f}%, lowest: {min_s} at {min_v:.0f}%. "
+                            f"Possible causes: thermal drift, operator differences, or end-of-shift fatigue. "
+                            f"Investigate conditions during {min_s}."
+                        ),
+                    })
+                elif drop > 5:
+                    insights.append({
+                        'rule': 'shift_degradation',
+                        'severity': 'medium',
+                        'title': f"{tid} / {mid} — Shift variation ({drop:.0f} pp)",
+                        'detail': (
+                            f"{tid} on {mid} shows {drop:.0f} pp variation across shifts "
+                            f"({max_s}: {max_v:.0f}% → {min_s}: {min_v:.0f}%). "
+                            f"Worthwhile investigating {min_s} conditions."
+                        ),
+                    })
+
+    # ── 3. Underutilised pairing ──────────────────────────────────────────────
+    for tid, tgrp in part_fit.groupby('tool_id'):
+        if len(tgrp) > 1:
+            continue  # already tested on multiple machines
+        tested_m = tgrp.iloc[0]['machine_id']
+        tested_v = tgrp.iloc[0]['cap_efficiency_pct']
+        sup      = tgrp.iloc[0]['supplier_id'] if 'supplier_id' in tgrp.columns else None
+
+        # Find other machines where similar tools (same supplier) perform better
+        if sup:
+            similar = fit_df[
+                (fit_df['supplier_id'] == sup) &
+                (~fit_df['tool_id'].isin(tool_ids))
+            ]
+            better = similar[similar['cap_efficiency_pct'] > tested_v + 5]
+            if not better.empty:
+                best_alt = better.loc[better['cap_efficiency_pct'].idxmax()]
+                insights.append({
+                    'rule': 'underutilised',
+                    'severity': 'medium',
+                    'title': f"{tid} — Only tested on one machine",
+                    'detail': (
+                        f"{tid} has only ever run on {tested_m} ({tested_v:.0f}% cap eff). "
+                        f"Other {sup} tools perform better on {best_alt['machine_id']} "
+                        f"({best_alt['cap_efficiency_pct']:.0f}% cap eff). "
+                        f"Recommend trialling {tid} on {best_alt['machine_id']}."
+                    ),
+                })
+
+    # ── 4. Best window ────────────────────────────────────────────────────────
+    if not df_processed.empty and 'run_id' in df_processed.columns and 'machine_id' in df_processed.columns:
+        part_proc = df_processed[df_processed['tool_id'].isin(tool_ids)].copy()
+        if not part_proc.empty:
+            best_run_eff = -1; best_run_info = None
+            for (tid, mid, run_id), rg in part_proc.groupby(['tool_id','machine_id','run_id']):
+                prod = rg[rg['stop_flag'] == 0]
+                dur  = (rg['shot_time'].max() - rg['shot_time'].min()).total_seconds()
+                if dur < 600: continue  # skip runs < 10 min
+                rct  = float(rg['approved_ct_for_run'].iloc[0]) if 'approved_ct_for_run' in rg.columns else float(rg['approved_ct'].iloc[0])
+                rcav = float(rg['working_cavities'].max()) if 'working_cavities' in rg.columns else 1.0
+                opt  = (dur / rct) * rcav if rct > 0 else 0
+                act  = float(prod['working_cavities'].sum()) if 'working_cavities' in prod.columns else float(len(prod))
+                eff  = act / opt * 100 if opt > 0 else 0
+                if eff > best_run_eff:
+                    best_run_eff  = eff
+                    best_run_info = {
+                        'tool_id':    tid,
+                        'machine_id': mid,
+                        'start':      rg['shot_time'].min().strftime('%d %b %Y %H:%M'),
+                        'end':        rg['shot_time'].max().strftime('%d %b %Y %H:%M'),
+                        'eff':        round(eff, 0),
+                        'hrs':        round(dur / 3600, 1),
+                        'period':     rg['session_period'].iloc[0] if 'session_period' in rg.columns else '—',
+                    }
+            if best_run_info:
+                r = best_run_info
+                insights.append({
+                    'rule': 'best_window',
+                    'severity': 'info',
+                    'title': f"Peak performance: {r['tool_id']} on {r['machine_id']} — {r['eff']:.0f}% cap eff",
+                    'detail': (
+                        f"Best recorded production window: {r['start']} → {r['end']} "
+                        f"({r['hrs']:.1f} hrs, {r['period']}). "
+                        f"Cap efficiency: {r['eff']:.0f}%. "
+                        f"Use this as the benchmark for what this part is capable of."
+                    ),
+                })
+
+    # ── 5. Sibling divergence ─────────────────────────────────────────────────
+    if len(tool_ids) > 1:
+        tool_avgs = part_fit.groupby('tool_id')['cap_efficiency_pct'].mean()
+        if len(tool_avgs) > 1:
+            best_tool  = tool_avgs.idxmax()
+            worst_tool = tool_avgs.idxmin()
+            gap = tool_avgs.max() - tool_avgs.min()
+            if gap > 10:
+                insights.append({
+                    'rule': 'sibling_divergence',
+                    'severity': 'high',
+                    'title': f"Copy tool divergence — {gap:.0f} pp gap between {best_tool} and {worst_tool}",
+                    'detail': (
+                        f"{best_tool} averages {tool_avgs[best_tool]:.0f}% cap efficiency across all machines, "
+                        f"while {worst_tool} averages only {tool_avgs[worst_tool]:.0f}%. "
+                        f"These are copy tools of the same part — a {gap:.0f} pp gap suggests "
+                        f"tooling wear, damage, or maintenance differences. "
+                        f"Recommend physical inspection of {worst_tool}."
+                    ),
+                })
+            elif gap > 5:
+                insights.append({
+                    'rule': 'sibling_divergence',
+                    'severity': 'medium',
+                    'title': f"Copy tool gap — {gap:.0f} pp between {best_tool} and {worst_tool}",
+                    'detail': (
+                        f"{best_tool} ({tool_avgs[best_tool]:.0f}%) is outperforming "
+                        f"{worst_tool} ({tool_avgs[worst_tool]:.0f}%) by {gap:.0f} pp on average. "
+                        f"Monitor {worst_tool} for wear indicators."
+                    ),
+                })
+
+    # ── 6. Stagnation / decline ───────────────────────────────────────────────
+    if not df_processed.empty and 'run_id' in df_processed.columns and 'machine_id' in df_processed.columns:
+        part_proc = df_processed[df_processed['tool_id'].isin(tool_ids)].copy()
+        if not part_proc.empty:
+            for (tid, mid), grp in part_proc.groupby(['tool_id','machine_id']):
+                run_effs = []
+                for run_id, rg in grp.groupby('run_id'):
+                    prod = rg[rg['stop_flag'] == 0]
+                    dur  = (rg['shot_time'].max() - rg['shot_time'].min()).total_seconds()
+                    if dur < 600: continue
+                    rct  = float(rg['approved_ct_for_run'].iloc[0]) if 'approved_ct_for_run' in rg.columns else float(rg['approved_ct'].iloc[0])
+                    rcav = float(rg['working_cavities'].max()) if 'working_cavities' in rg.columns else 1.0
+                    opt  = (dur / rct) * rcav if rct > 0 else 0
+                    act  = float(prod['working_cavities'].sum()) if 'working_cavities' in prod.columns else float(len(prod))
+                    eff  = act / opt * 100 if opt > 0 else 0
+                    run_effs.append((rg['shot_time'].min(), eff))
+
+                if len(run_effs) < 4:
+                    continue
+
+                run_effs.sort(key=lambda x: x[0])
+                effs = [e for _, e in run_effs]
+                first_half  = np.mean(effs[:len(effs)//2])
+                second_half = np.mean(effs[len(effs)//2:])
+                trend = second_half - first_half
+
+                if trend < -8:
+                    insights.append({
+                        'rule': 'stagnation',
+                        'severity': 'high',
+                        'title': f"{tid} / {mid} — Declining performance ({trend:.0f} pp trend)",
+                        'detail': (
+                            f"{tid} on {mid} is declining over time. "
+                            f"First half of runs averaged {first_half:.0f}% cap eff, "
+                            f"second half averaged {second_half:.0f}% — a {abs(trend):.0f} pp drop. "
+                            f"Across {len(effs)} runs. "
+                            f"Likely tooling wear or machine degradation. Maintenance recommended."
+                        ),
+                    })
+                elif trend < -4:
+                    insights.append({
+                        'rule': 'stagnation',
+                        'severity': 'medium',
+                        'title': f"{tid} / {mid} — Gradual decline ({trend:.0f} pp trend)",
+                        'detail': (
+                            f"{tid} on {mid} shows a gradual downward trend across {len(effs)} runs "
+                            f"({first_half:.0f}% → {second_half:.0f}%). Monitor closely."
+                        ),
+                    })
+                elif -2 <= trend <= 2 and len(effs) >= 6:
+                    insights.append({
+                        'rule': 'stagnation',
+                        'severity': 'info',
+                        'title': f"{tid} / {mid} — No improvement across {len(effs)} runs",
+                        'detail': (
+                            f"{tid} on {mid} has shown no meaningful change across {len(effs)} runs "
+                            f"(avg: {np.mean(effs):.0f}%). "
+                            f"If below target, check process parameters — the pairing appears stable but sub-optimal."
+                        ),
+                    })
+
+    # Sort: high → medium → info
+    order = {'high': 0, 'medium': 1, 'info': 2}
+    insights.sort(key=lambda x: order.get(x['severity'], 3))
+    return insights
