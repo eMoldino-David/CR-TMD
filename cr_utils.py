@@ -1813,37 +1813,45 @@ def load_tmd_log(file) -> pd.DataFrame:
 def assign_machine_from_tmd(df_shots: pd.DataFrame, df_tmd: pd.DataFrame) -> pd.DataFrame:
     """
     Joins shots to TMD sessions by timestamp window.
-    For each machine: pairs each AUTO_MATCHED with the next UNMATCHED event
-    to define a session window, then assigns machine_id to shots whose
-    shot_time falls within that window.
-
-    Returns df_shots with a new 'machine_id' column (NaN where no session matched).
+    Adds: machine_id, session_id, session_period (Morning/Afternoon/Night).
     """
     if df_tmd.empty or df_shots.empty:
         return df_shots
 
     df_shots = df_shots.copy()
-    df_shots["machine_id"] = None  # object dtype — accepts string assignment
+    df_shots["machine_id"]     = None
+    df_shots["session_id"]     = None
+    df_shots["session_period"] = None
 
+    def _period(dt):
+        h = dt.hour
+        if 6 <= h < 14:  return "Morning"
+        if 14 <= h < 22: return "Afternoon"
+        return "Night"
+
+    session_counter = 0
     for machine_id, grp in df_tmd.groupby("Machine ID"):
         grp = grp.sort_values("Date/Time").reset_index(drop=True)
-        matched = grp[grp["Status"] == "AUTO_MATCHED"].reset_index(drop=True)
+        matched   = grp[grp["Status"] == "AUTO_MATCHED"].reset_index(drop=True)
         unmatched = grp[grp["Status"] == "UNMATCHED"].reset_index(drop=True)
 
         for _, m_row in matched.iterrows():
-            session_start = m_row["Date/Time"]
-            tool_id       = m_row["Tooling ID"]
-
-            # Next UNMATCHED on this machine after the AUTO_MATCHED
-            following = unmatched[unmatched["Date/Time"] > session_start]
-            session_end = following.iloc[0]["Date/Time"] if not following.empty else df_shots["shot_time"].max()
+            session_start  = m_row["Date/Time"]
+            tool_id        = m_row["Tooling ID"]
+            following      = unmatched[unmatched["Date/Time"] > session_start]
+            session_end    = following.iloc[0]["Date/Time"] if not following.empty else df_shots["shot_time"].max()
+            session_counter += 1
+            sid    = f"S{session_counter:04d}"
+            period = _period(session_start)
 
             mask = (
                 (df_shots["shot_time"] >= session_start) &
                 (df_shots["shot_time"] <  session_end) &
                 (df_shots["tool_id"].astype(str) == str(tool_id))
             )
-            df_shots.loc[mask, "machine_id"] = machine_id
+            df_shots.loc[mask, "machine_id"]     = machine_id
+            df_shots.loc[mask, "session_id"]     = sid
+            df_shots.loc[mask, "session_period"] = period
 
     return df_shots
 
@@ -2202,3 +2210,262 @@ def compute_recommendations(fit_df: pd.DataFrame) -> pd.DataFrame:
         recs.append(rec)
 
     return pd.DataFrame(recs).sort_values('cap_eff_spread', ascending=False).reset_index(drop=True)
+
+
+# ==============================================================================
+# --- MATCH EFFICIENCY RATE ---
+# ==============================================================================
+
+def compute_match_efficiency_rate(fit_df: pd.DataFrame, threshold: float = 85.0) -> pd.DataFrame:
+    """
+    Per supplier: % of machine-tool sessions where cap_efficiency_pct >= threshold.
+    Also returns avg cap eff, total sessions, parts, prod hrs.
+    """
+    if fit_df.empty or 'supplier_id' not in fit_df.columns:
+        return pd.DataFrame()
+
+    rows = []
+    for sup, grp in fit_df.groupby('supplier_id'):
+        total     = len(grp)
+        efficient = (grp['cap_efficiency_pct'] >= threshold).sum()
+        rows.append({
+            'supplier_id':          sup,
+            'total_sessions':       total,
+            'efficient_sessions':   int(efficient),
+            'match_efficiency_pct': round(efficient / total * 100, 1) if total > 0 else 0.0,
+            'avg_cap_eff':          round(grp['cap_efficiency_pct'].mean(), 1),
+            'total_parts':          round(grp['total_parts'].sum(), 0),
+            'production_hrs':       round(grp['production_hrs'].sum(), 1),
+            'tools':                grp['tool_id'].nunique(),
+            'machines_used':        grp['machine_id'].nunique(),
+        })
+    return pd.DataFrame(rows).sort_values('match_efficiency_pct', ascending=False).reset_index(drop=True)
+
+
+# ==============================================================================
+# --- PRESS COMPARE ---
+# ==============================================================================
+
+def compute_press_compare(fit_df: pd.DataFrame, tool_ids: list,
+                           df_processed: pd.DataFrame = None,
+                           recent_days: int = 30) -> dict:
+    """
+    Tool-driven press comparison. Given one or more tool_ids (a part or copy group):
+    - All-time metrics per machine
+    - Recent (last N days) vs historical split
+    - % delta vs group average for each KPI
+    Returns dict with keys: 'alltime', 'recent', 'historical', 'delta'
+    """
+    KPIS = ['cap_efficiency_pct', 'stability_pct', 'efficiency_pct',
+            'mtbf_min', 'mttr_min', 'avg_ct_sec', 'total_parts',
+            'production_hrs', 'slow_loss_parts', 'fast_gain_parts',
+            'stop_count', 'fit_score']
+
+    KPI_LABELS = {
+        'cap_efficiency_pct': 'Cap Efficiency %',
+        'stability_pct':      'Stability %',
+        'efficiency_pct':     'Efficiency %',
+        'mtbf_min':           'MTBF (min)',
+        'mttr_min':           'MTTR (min)',
+        'avg_ct_sec':         'Avg CT (s)',
+        'total_parts':        'Parts Produced',
+        'production_hrs':     'Prod Hours',
+        'slow_loss_parts':    'Slow Cycle Loss',
+        'fast_gain_parts':    'Fast Cycle Gain',
+        'stop_count':         'Stop Events',
+        'fit_score':          'Fit Score',
+    }
+    # Higher = better for these; lower = better for rest
+    HIGHER_BETTER = {'cap_efficiency_pct','stability_pct','efficiency_pct',
+                     'mtbf_min','total_parts','production_hrs','fast_gain_parts','fit_score'}
+
+    base = fit_df[fit_df['tool_id'].isin(tool_ids)].copy()
+    if base.empty:
+        return {}
+
+    # All-time: pivot machine × KPI
+    alltime = base.groupby('machine_id')[KPIS].mean().round(2)
+
+    # % delta vs group mean
+    group_mean = alltime.mean()
+    delta = alltime.copy()
+    for col in KPIS:
+        if group_mean[col] != 0:
+            delta[col] = ((alltime[col] - group_mean[col]) / group_mean[col] * 100).round(1)
+        else:
+            delta[col] = 0.0
+
+    # Recent vs historical split using session timestamps from df_processed
+    recent_df = hist_df = pd.DataFrame()
+    if df_processed is not None and not df_processed.empty and 'session_id' in df_processed.columns:
+        sub = df_processed[df_processed['tool_id'].isin(tool_ids)].copy()
+        if not sub.empty:
+            cutoff = sub['shot_time'].max() - pd.Timedelta(days=recent_days)
+            sub['is_recent'] = sub['shot_time'] >= cutoff
+
+            def _agg(mask):
+                g = sub[mask].groupby('machine_id')
+                out = []
+                for m, mg in g:
+                    prod = mg[mg['stop_flag'] == 0]
+                    prod_time = float(prod['actual_ct'].sum())
+                    total_rt  = (mg['shot_time'].max() - mg['shot_time'].min()).total_seconds() + float(mg.iloc[-1]['actual_ct'])
+                    stops = int(mg['stop_event'].sum()) if 'stop_event' in mg.columns else 0
+                    act_out = float(prod['working_cavities'].sum()) if 'working_cavities' in prod.columns else float(len(prod))
+                    opt_out_s = 0.0
+                    for _, rg in mg.groupby('run_id'):
+                        dur = (rg['shot_time'].max()-rg['shot_time'].min()).total_seconds()+float(rg.iloc[-1]['actual_ct'])
+                        rct = float(rg['approved_ct_for_run'].iloc[0]) if 'approved_ct_for_run' in rg.columns else float(rg['approved_ct'].iloc[0])
+                        rc  = float(rg['working_cavities'].max()) if 'working_cavities' in rg.columns else 1.0
+                        if rct > 0: opt_out_s += (dur/rct)*rc
+                    out.append({
+                        'machine_id':        m,
+                        'cap_efficiency_pct':round(act_out/opt_out_s*100,1) if opt_out_s>0 else 0,
+                        'stability_pct':     round(prod_time/total_rt*100,1) if total_rt>0 else 0,
+                        'stop_count':        stops,
+                        'total_parts':       round(act_out,0),
+                        'production_hrs':    round(total_rt/3600,1),
+                        'mtbf_min':          round(prod_time/60/stops,1) if stops>0 else round(prod_time/60,1),
+                        'mttr_min':          round((total_rt-prod_time)/60/stops,1) if stops>0 else 0,
+                    })
+                return pd.DataFrame(out).set_index('machine_id') if out else pd.DataFrame()
+
+            recent_df = _agg(sub['is_recent'])
+            hist_df   = _agg(~sub['is_recent'])
+
+    return {
+        'alltime':     alltime,
+        'delta':       delta,
+        'recent':      recent_df,
+        'historical':  hist_df,
+        'kpi_labels':  KPI_LABELS,
+        'higher_better': HIGHER_BETTER,
+    }
+
+
+# ==============================================================================
+# --- WEEKLY REPORT GENERATOR ---
+# ==============================================================================
+
+def generate_weekly_report(fit_df: pd.DataFrame,
+                            scorecard: pd.DataFrame,
+                            recs_df: pd.DataFrame,
+                            mer_df: pd.DataFrame,
+                            rankings_df: pd.DataFrame,
+                            report_date: str = None) -> bytes:
+    """
+    Generates a weekly Excel report as bytes (for st.download_button).
+    Sheets: Summary, Match Efficiency, Supplier Scorecard,
+            Optimal Pairings, Machine Rankings, All Sessions.
+    """
+    import io
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    output = io.BytesIO()
+
+    HEADER_FILL = PatternFill("solid", fgColor="1F3864")
+    HEADER_FONT = Font(color="FFFFFF", bold=True)
+    GREEN_FILL  = PatternFill("solid", fgColor="C6EFCE")
+    RED_FILL    = PatternFill("solid", fgColor="FFC7CE")
+    AMB_FILL    = PatternFill("solid", fgColor="FFEB9C")
+
+    def _write_sheet(ws, df, title=None):
+        if title:
+            ws.append([title])
+            ws.cell(1,1).font = Font(bold=True, size=13)
+            ws.append([])
+        if df.empty:
+            ws.append(["No data available"])
+            return
+        ws.append(list(df.columns))
+        hrow = ws.max_row
+        for cell in ws[hrow]:
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = Alignment(horizontal='center')
+        for row in df.itertuples(index=False):
+            ws.append(list(row))
+        # Auto-width
+        for col in ws.columns:
+            max_len = max((len(str(c.value)) if c.value else 0) for c in col)
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 3, 40)
+
+    def _color_col(ws, col_idx, good_thresh, bad_thresh, higher_better=True, data_start_row=3):
+        for row in ws.iter_rows(min_row=data_start_row, min_col=col_idx, max_col=col_idx):
+            for cell in row:
+                try:
+                    v = float(cell.value)
+                    if higher_better:
+                        cell.fill = GREEN_FILL if v >= good_thresh else (RED_FILL if v < bad_thresh else AMB_FILL)
+                    else:
+                        cell.fill = GREEN_FILL if v <= good_thresh else (RED_FILL if v > bad_thresh else AMB_FILL)
+                except (TypeError, ValueError):
+                    pass
+
+    from openpyxl import Workbook
+    wb = Workbook()
+
+    # ── Sheet 1: Summary ──────────────────────────────────────────────────────
+    ws_sum = wb.active
+    ws_sum.title = "Summary"
+    date_str = report_date or pd.Timestamp.now().strftime("%Y-%m-%d")
+    ws_sum.append([f"Machine Fit Weekly Report — {date_str}"])
+    ws_sum.cell(1,1).font = Font(bold=True, size=14)
+    ws_sum.append([])
+    ws_sum.append(["Metric", "Value"])
+    for c in ws_sum[3]: c.fill=HEADER_FILL; c.font=HEADER_FONT
+    if not fit_df.empty:
+        ws_sum.append(["Suppliers Tracked",      fit_df['supplier_id'].nunique() if 'supplier_id' in fit_df.columns else '—'])
+        ws_sum.append(["Tools Tracked",           fit_df['tool_id'].nunique()])
+        ws_sum.append(["Total Sessions",          len(fit_df)])
+        ws_sum.append(["Total Parts Produced",    f"{fit_df['total_parts'].sum():,.0f}"])
+        ws_sum.append(["Total Production Hours",  f"{fit_df['production_hrs'].sum():,.1f}"])
+        ws_sum.append(["Avg Cap Efficiency",      f"{fit_df['cap_efficiency_pct'].mean():.1f}%"])
+        ws_sum.append(["Avg Fit Score",           f"{fit_df['fit_score'].mean():.1f} / 100"])
+    if not mer_df.empty:
+        top_sup = mer_df.iloc[0]
+        ws_sum.append(["Top Supplier (Match Eff)", f"{top_sup['supplier_id']} — {top_sup['match_efficiency_pct']:.1f}%"])
+    ws_sum.column_dimensions['A'].width = 30
+    ws_sum.column_dimensions['B'].width = 25
+
+    # ── Sheet 2: Match Efficiency ─────────────────────────────────────────────
+    ws_mer = wb.create_sheet("Match Efficiency")
+    _write_sheet(ws_mer, mer_df.rename(columns={
+        'supplier_id':'Supplier','total_sessions':'Total Sessions',
+        'efficient_sessions':'Efficient Sessions','match_efficiency_pct':'Match Eff %',
+        'avg_cap_eff':'Avg Cap Eff %','total_parts':'Parts','production_hrs':'Prod Hrs',
+        'tools':'Tools','machines_used':'Machines',
+    }) if not mer_df.empty else pd.DataFrame(), title="Match Efficiency Rate by Supplier")
+
+    # ── Sheet 3: Supplier Scorecard ───────────────────────────────────────────
+    ws_sc = wb.create_sheet("Supplier Scorecard")
+    _write_sheet(ws_sc, scorecard if not scorecard.empty else pd.DataFrame(),
+                 title="Supplier Scorecard")
+
+    # ── Sheet 4: Optimal Pairings ─────────────────────────────────────────────
+    ws_rec = wb.create_sheet("Optimal Pairings")
+    _write_sheet(ws_rec, recs_df[[c for c in [
+        'machine_id','best_tool','best_supplier','best_cap_eff','best_parts_per_hr',
+        'worst_tool','worst_supplier','worst_cap_eff','tools_compared','cap_eff_spread',
+        'parts_gain_best_vs_worst'] if c in recs_df.columns]] if not recs_df.empty else pd.DataFrame(),
+        title="Optimal Machine-Tool Pairings")
+
+    # ── Sheet 5: Machine Rankings ─────────────────────────────────────────────
+    ws_rk = wb.create_sheet("Machine Rankings")
+    _write_sheet(ws_rk, rankings_df if not rankings_df.empty else pd.DataFrame(),
+                 title="Machine Tool Rankings (All Sessions)")
+
+    # ── Sheet 6: All Sessions ─────────────────────────────────────────────────
+    ws_all = wb.create_sheet("All Sessions")
+    export_cols = [c for c in [
+        'tool_id','supplier_id','machine_id','runs','production_hrs','total_parts',
+        'cap_efficiency_pct','stability_pct','efficiency_pct','fit_score',
+        'avg_ct_sec','mtbf_min','mttr_min','stop_count','downtime_hrs',
+        'slow_loss_parts','fast_gain_parts'
+    ] if c in fit_df.columns]
+    _write_sheet(ws_all, fit_df[export_cols].round(2) if not fit_df.empty else pd.DataFrame(),
+                 title="All Machine-Tool Sessions")
+
+    wb.save(output)
+    return output.getvalue()
