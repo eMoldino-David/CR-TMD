@@ -1291,6 +1291,23 @@ def main():
         help="Upload tools_reference.xlsx to enable copy group detection."
     )
 
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Shift Configuration")
+    n_shifts = st.sidebar.selectbox("Number of Shifts", [1, 2, 3], index=2, key="shift_count")
+    shift_start_hr = st.sidebar.number_input("First Shift Start (24h)", 0, 23, 6, key="shift_start")
+    max_hours = st.sidebar.number_input("Max Working Hours / Shift", 4, 12, 8, key="shift_max_hrs")
+
+    # Build shift config list: [(name, start_hr, end_hr), ...]
+    shift_hrs = max_hours
+    shift_config = []
+    for i in range(n_shifts):
+        s = (shift_start_hr + i * shift_hrs) % 24
+        e = (s + shift_hrs) % 24
+        names = ["Shift 1", "Shift 2", "Shift 3"]
+        shift_config.append((names[i], s, e))
+    # Pass to session state so render function can access
+    st.session_state['shift_config'] = shift_config
+
     if not files:
         st.info("👈 Upload one or more production data files to begin.")
         st.stop()
@@ -1321,7 +1338,10 @@ def main():
     if tmd_log_file:
         df_tmd = cr_CG_utils.load_tmd_log(tmd_log_file)
         if not df_tmd.empty:
-            df_all = cr_CG_utils.assign_machine_from_tmd(df_all, df_tmd)
+            df_all = cr_CG_utils.assign_machine_from_tmd(
+                df_all, df_tmd,
+                shift_config=st.session_state.get('shift_config')
+            )
             matched_pct = df_all['machine_id'].notna().mean() * 100
             st.sidebar.success(f"TMD log loaded — {matched_pct:.0f}% of shots matched to a machine session.")
         else:
@@ -1641,116 +1661,98 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
 
             st.markdown("---")
             c_left, c_right = st.columns(2)
+            CHART_H = 280
 
             # ── Match Efficiency Rate bar ──────────────────────────────────────
             with c_left:
-                st.markdown("#### Match Efficiency Rate by Supplier")
-                st.caption(
-                    "% of machine-tool sessions where Cap Efficiency ≥ 85%. "
-                    "Shows how reliably each supplier's tooling performs above threshold."
-                )
+                st.markdown("##### Match Efficiency Rate by Supplier")
+                st.caption("% of sessions where Cap Efficiency ≥ 85%")
                 if not mer_df.empty:
-                    mer_colors = [
-                        C['green'] if v >= 75 else (C['orange'] if v >= 50 else C['red'])
-                        for v in mer_df['match_efficiency_pct']
-                    ]
+                    mer_colors = [C['green'] if v>=75 else (C['orange'] if v>=50 else C['red'])
+                                  for v in mer_df['match_efficiency_pct']]
                     fig_mer = go.Figure(go.Bar(
-                        x=mer_df['supplier_id'],
-                        y=mer_df['match_efficiency_pct'],
+                        x=mer_df['supplier_id'], y=mer_df['match_efficiency_pct'],
                         marker_color=mer_colors,
-                        text=mer_df['match_efficiency_pct'].astype(str) + '%',
+                        text=mer_df['match_efficiency_pct'].round(0).astype(int).astype(str)+'%',
                         textposition='outside',
-                        customdata=np.stack([
-                            mer_df['efficient_sessions'],
-                            mer_df['total_sessions'],
-                            mer_df['avg_cap_eff'],
-                        ], axis=-1),
-                        hovertemplate=(
-                            "<b>%{x}</b><br>"
-                            "Match Eff: %{y:.1f}%<br>"
-                            "Efficient Sessions: %{customdata[0]} / %{customdata[1]}<br>"
-                            "Avg Cap Eff: %{customdata[2]:.1f}%<extra></extra>"
-                        ),
+                        customdata=np.stack([mer_df['efficient_sessions'],
+                                             mer_df['total_sessions'],
+                                             mer_df['avg_cap_eff']], axis=-1),
+                        hovertemplate="<b>%{x}</b><br>Match Eff: %{y:.0f}%<br>"
+                                      "Efficient: %{customdata[0]} / %{customdata[1]} sessions<br>"
+                                      "Avg Cap Eff: %{customdata[2]:.0f}%<extra></extra>",
                     ))
-                    fig_mer.update_layout(
-                        yaxis=dict(range=[0, 110], title="Match Efficiency %"),
-                        height=300, margin=dict(t=20, b=40),
-                    )
+                    fig_mer.update_layout(yaxis=dict(range=[0,115],title="Match Eff %"),
+                                         height=CHART_H, margin=dict(t=10,b=30,l=40,r=10))
                     st.plotly_chart(fig_mer, use_container_width=True, key=f"ov_mer{key_suffix}")
 
-                    mer_disp = mer_df.rename(columns={
+                    mer_disp = mer_df[['supplier_id','total_sessions','efficient_sessions',
+                                        'match_efficiency_pct','avg_cap_eff','total_parts',
+                                        'production_hrs','tools']].rename(columns={
                         'supplier_id':'Supplier','total_sessions':'Sessions',
                         'efficient_sessions':'Efficient','match_efficiency_pct':'Match Eff %',
                         'avg_cap_eff':'Avg Cap Eff %','total_parts':'Parts',
-                        'production_hrs':'Prod Hrs','tools':'Tools','machines_used':'Machines',
+                        'production_hrs':'Prod Hrs','tools':'Tools',
                     })
                     def _style_mer(row):
                         styles = [''] * len(row)
                         for i, col in enumerate(mer_disp.columns):
                             if col == 'Match Eff %':
                                 v = row[col]
-                                styles[i] = (f'color:{C["green"]};font-weight:bold' if v >= 75
-                                             else (f'color:{C["orange"]}' if v >= 50
-                                             else f'color:{C["red"]}'))
-                            elif col == 'Avg Cap Eff %':
-                                v = row[col]
-                                styles[i] = (f'color:{C["green"]}' if v >= 90
-                                             else (f'color:{C["orange"]}' if v >= 75
-                                             else f'color:{C["red"]}'))
+                                styles[i] = (f'color:{C["green"]};font-weight:bold' if v>=75
+                                             else (f'color:{C["orange"]}' if v>=50 else f'color:{C["red"]}'))
                         return styles
-                    st.dataframe(
-                        mer_disp.style.apply(_style_mer, axis=1).format(precision=1, na_rep='—'),
-                        use_container_width=True, hide_index=True
-                    )
+                    st.dataframe(mer_disp.style.apply(_style_mer,axis=1)
+                                 .format({'Match Eff %':'{:.0f}%','Avg Cap Eff %':'{:.0f}%',
+                                          'Parts':'{:,.0f}','Prod Hrs':'{:.0f}'}, na_rep='—'),
+                                 use_container_width=True, hide_index=True)
 
             # ── Cap Efficiency bar ────────────────────────────────────────────
             with c_right:
-                st.markdown("#### Avg Cap Efficiency by Supplier")
+                st.markdown("##### Avg Cap Efficiency by Supplier")
+                st.caption("Average across all machine-tool sessions")
                 if not scorecard.empty:
-                    colors = [
-                        C['green'] if v == scorecard['avg_cap_eff'].max()
-                        else (C['red'] if v == scorecard['avg_cap_eff'].min() else C['blue'])
-                        for v in scorecard['avg_cap_eff']
-                    ]
+                    colors = [C['green'] if v==scorecard['avg_cap_eff'].max()
+                              else (C['red'] if v==scorecard['avg_cap_eff'].min() else C['blue'])
+                              for v in scorecard['avg_cap_eff']]
                     fig_bar = go.Figure(go.Bar(
                         x=scorecard['supplier_id'], y=scorecard['avg_cap_eff'],
                         marker_color=colors,
-                        text=scorecard['avg_cap_eff'].round(1).astype(str) + '%',
+                        text=scorecard['avg_cap_eff'].round(0).astype(int).astype(str)+'%',
                         textposition='outside',
                     ))
                     fig_bar.update_layout(
-                        yaxis=dict(
-                            range=[max(0, scorecard['avg_cap_eff'].min()-10), 110],
-                            title="Cap Efficiency %"
-                        ),
-                        height=300, margin=dict(t=20, b=40),
+                        yaxis=dict(range=[max(0,scorecard['avg_cap_eff'].min()-10),115],
+                                   title="Cap Eff %"),
+                        height=CHART_H, margin=dict(t=10,b=30,l=40,r=10),
                     )
                     st.plotly_chart(fig_bar, use_container_width=True, key=f"ov_cap{key_suffix}")
 
                     sc_disp = scorecard[['rank','supplier_id','total_tools','total_machines',
-                                         'total_parts','production_hrs','avg_cap_eff',
-                                         'avg_stability','avg_mtbf','avg_mttr',
-                                         'best_machine','worst_machine']].rename(columns={
+                                          'total_parts','production_hrs','avg_cap_eff',
+                                          'avg_stability','avg_mtbf','avg_mttr',
+                                          'best_machine','worst_machine']].rename(columns={
                         'rank':'#','supplier_id':'Supplier','total_tools':'Tools',
                         'total_machines':'Machines','total_parts':'Parts',
                         'production_hrs':'Prod Hrs','avg_cap_eff':'Cap Eff %',
                         'avg_stability':'Stability %','avg_mtbf':'MTBF (min)',
-                        'avg_mttr':'MTTR (min)','best_machine':'Best Machine',
-                        'worst_machine':'Worst Machine',
+                        'avg_mttr':'MTTR (min)',
+                        'best_machine':'Best Machine-Tool Match',
+                        'worst_machine':'Worst Machine-Tool Match',
                     })
                     def _style_sc(row):
                         styles = [''] * len(row)
                         for i, col in enumerate(sc_disp.columns):
                             if col == 'Cap Eff %':
                                 v = row[col]
-                                styles[i] = (f'color:{C["green"]};font-weight:bold' if v >= 90
-                                             else (f'color:{C["orange"]}' if v >= 75
-                                             else f'color:{C["red"]}'))
+                                styles[i] = (f'color:{C["green"]};font-weight:bold' if v>=90
+                                             else (f'color:{C["orange"]}' if v>=75 else f'color:{C["red"]}'))
                         return styles
-                    st.dataframe(
-                        sc_disp.style.apply(_style_sc, axis=1).format(precision=1, na_rep='—'),
-                        use_container_width=True, hide_index=True
-                    )
+                    st.dataframe(sc_disp.style.apply(_style_sc,axis=1)
+                                 .format({'Cap Eff %':'{:.0f}%','Stability %':'{:.0f}%',
+                                          'MTBF (min)':'{:.0f}','MTTR (min)':'{:.1f}',
+                                          'Parts':'{:,.0f}','Prod Hrs':'{:.0f}'}, na_rep='—'),
+                                 use_container_width=True, hide_index=True)
 
             # ── Weekly report download ─────────────────────────────────────────
             st.markdown("---")
@@ -1787,17 +1789,16 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
         all_tools_pc  = sorted(fit_df['tool_id'].unique())
         all_groups_pc = sorted({v for v in copy_map.values() if v})
 
-        pc_mode = st.radio("Select by", ["Individual Tool", "Copy Group (Part)"],
+        pc_mode = st.radio("Select by", ["Individual Tool", "Part (Copy Group)"],
                            horizontal=True, key=f"pc_mode{key_suffix}")
 
-        if pc_mode == "Copy Group (Part)" and all_groups_pc:
-            sel_group = st.selectbox("Part / Copy Group", all_groups_pc,
-                                     key=f"pc_group{key_suffix}")
+        if pc_mode == "Part (Copy Group)" and all_groups_pc:
+            sel_group = st.selectbox("Part ID", all_groups_pc, key=f"pc_group{key_suffix}")
             sel_tool_ids = [t for t in all_tools_pc if copy_map.get(t) == sel_group]
-            label = f"Part: {sel_group} ({', '.join(sel_tool_ids)})"
+            label = f"Part {sel_group} — Tools: {', '.join(sel_tool_ids)}"
         else:
-            def _tlabel(tid): return f"{tid} [{copy_map[tid]}]" if tid in copy_map else tid
-            sel_tool = st.selectbox("Tool", all_tools_pc, format_func=_tlabel,
+            def _tlabel(tid): return f"{tid} [Part: {copy_map[tid]}]" if tid in copy_map else f"{tid} [Single]"
+            sel_tool = st.selectbox("Tool ID", all_tools_pc, format_func=_tlabel,
                                     key=f"pc_tool{key_suffix}")
             sel_tool_ids = [sel_tool]
             label = _tlabel(sel_tool)
@@ -1943,37 +1944,66 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
         if recs_df.empty:
             st.warning("Not enough data to generate pairings.")
         else:
-            r1, r2, r3 = st.columns(3)
-            r1.metric("Machines with Data",    f"{len(recs_df)}")
+            r1, r2 = st.columns(2)
+            r1.metric("Machines with Data",   f"{len(recs_df)}")
+            gain_total = recs_df['parts_gain_best_vs_worst'].sum()
             r2.metric("Total Gain Potential",
-                      f"{recs_df['parts_gain_best_vs_worst'].sum():,.1f} parts/hr")
-            r3.metric("Avg Cap Eff Spread",    f"{recs_df['cap_eff_spread'].mean():.1f} pp")
+                      f"+{gain_total:,.0f} parts/hr" if gain_total >= 0 else f"{gain_total:,.0f} parts/hr",
+                      help="Sum across all machines: extra parts/hr if each ran its best tool vs worst")
 
             st.markdown("---")
             st.markdown("#### Recommended Pairings")
+            st.caption("Expand each machine to see detailed metrics of its optimal run period.")
 
             for _, row in recs_df.iterrows():
+                gain = row['parts_gain_best_vs_worst']
                 spread_color = C['orange'] if row['cap_eff_spread'] > 5 else C['blue']
-                st.markdown(f"""
-                <div style="background:#1a1a2e;border-left:4px solid {C['green']};
-                            border-radius:6px;padding:14px;margin-bottom:10px">
-                    <b style="font-size:1.05em">Machine: {row['machine_id']}</b>
-                    &nbsp;&nbsp;
-                    <span style="color:{C['green']};font-weight:bold">
-                        Best: {row['best_tool']} ({row['best_supplier']})
-                    </span>
-                    &nbsp;|&nbsp;
-                    <span style="color:{spread_color}">
-                        +{row['parts_gain_best_vs_worst']:.1f} parts/hr vs worst
-                        &nbsp;({row['cap_eff_spread']:.1f} pp spread, {int(row['tools_compared'])} tools)
-                    </span>
-                    <br>
-                    <span style="font-size:0.85em;color:#aaa">
-                        Best cap eff: {row['best_cap_eff']:.1f}%
-                        &nbsp;|&nbsp;Worst: {row['worst_tool']} ({row['worst_supplier']})
-                        at {row['worst_cap_eff']:.1f}%
-                    </span>
-                </div>""", unsafe_allow_html=True)
+                gain_str = f"+{gain:.0f}" if gain >= 0 else f"{gain:.0f}"
+
+                with st.expander(
+                    f"**{row['machine_id']}** — Best match: {row['best_tool']} "
+                    f"({row['best_supplier']}) | {gain_str} parts/hr vs worst | "
+                    f"{row['cap_eff_spread']:.0f} pp spread across {int(row['tools_compared'])} tools"
+                ):
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        st.markdown(f"**Best match: {row['best_tool']}** ({row['best_supplier']})")
+                        st.markdown(f"Cap Efficiency: **{row['best_cap_eff']:.0f}%**")
+                        st.markdown(f"Parts/hr: **{row['best_parts_per_hr']:.0f}**")
+
+                        # Find the best session for this tool-machine pair
+                        best_sessions = fit_df[
+                            (fit_df['tool_id'] == row['best_tool']) &
+                            (fit_df['machine_id'] == row['machine_id'])
+                        ]
+                        if not best_sessions.empty:
+                            st.markdown("**Optimal session metrics:**")
+                            bs = best_sessions.iloc[0]
+                            st.markdown(
+                                f"Stability: {bs['stability_pct']:.0f}% &nbsp;|&nbsp; "
+                                f"MTBF: {bs['mtbf_min']:.0f} min &nbsp;|&nbsp; "
+                                f"MTTR: {bs['mttr_min']:.1f} min  \n"
+                                f"Slow Loss: {bs['slow_loss_parts']:.0f} parts &nbsp;|&nbsp; "
+                                f"Fast Gain: {bs['fast_gain_parts']:.0f} parts  \n"
+                                f"Prod Hrs: {bs['production_hrs']:.0f} &nbsp;|&nbsp; "
+                                f"Parts: {bs['total_parts']:.0f}"
+                            )
+                            # Capacity Risk Analysis button
+                            btn_key = f"cr_analysis_{row['machine_id']}_{row['best_tool']}"
+                            if st.button(f"📊 Run CR Analysis on this pairing", key=btn_key):
+                                st.session_state['cr_analysis_tool']    = row['best_tool']
+                                st.session_state['cr_analysis_machine'] = row['machine_id']
+                                st.success(
+                                    f"Go to the main Capacity tab and select **{row['best_tool']}** "
+                                    f"to see the full capacity risk breakdown for this optimal pairing. "
+                                    f"(Machine filter: {row['machine_id']})"
+                                )
+
+                    with ec2:
+                        st.markdown(f"**Worst match: {row['worst_tool']}** ({row['worst_supplier']})")
+                        st.markdown(f"Cap Efficiency: **{row['worst_cap_eff']:.0f}%**")
+                        st.markdown(f"Spread vs best: **{row['cap_eff_spread']:.0f} pp**")
+                        st.markdown(f"Gain if replaced: **{gain_str} parts/hr**")
 
             st.markdown("#### Full Table")
             best_display = recs_df[[
@@ -1994,11 +2024,14 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                     if col == 'Best Cap Eff %':    styles[i] = f'color:{C["green"]};font-weight:bold'
                     elif col == 'Worst Cap Eff %': styles[i] = f'color:{C["red"]}'
                     elif col in ('Spread (pp)', 'Gain (parts/hr)'):
-                        styles[i] = f'color:{C["orange"]}' if row[col] > 5 else ''
+                        styles[i] = f'color:{C["orange"]}' if abs(row[col]) > 5 else ''
                 return styles
 
             st.dataframe(
-                best_display.style.apply(_style_recs, axis=1).format(precision=1, na_rep='—'),
+                best_display.style.apply(_style_recs, axis=1)
+                .format({'Best Cap Eff %':'{:.0f}%','Worst Cap Eff %':'{:.0f}%',
+                         'Best Parts/hr':'{:.0f}','Spread (pp)':'{:.0f}',
+                         'Gain (parts/hr)':'{:+.0f}'}, na_rep='—'),
                 use_container_width=True, hide_index=True
             )
 
@@ -2092,24 +2125,12 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                 use_container_width=True, hide_index=True
             )
 
-            # ── Pivot: All machines × all tools ───────────────────────────────
-            st.markdown("#### Cap Efficiency % — All Machines × All Tools")
-            st.caption("Green = higher cap efficiency on that machine. Blank = not yet tested together.")
-            pv = pd.pivot_table(
-                fit_df, values='cap_efficiency_pct',
-                index='machine_id', columns='tool_id', aggfunc='mean'
-            ).round(1)
-            st.dataframe(
-                pv.style.background_gradient(cmap='RdYlGn', axis=None, vmin=70, vmax=105)
-                        .format(precision=1, na_rep=''),
-                use_container_width=True
-            )
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 3 — DEEP DIVE
+    # TAB 4 — TOOL DEEP DIVE
     # ══════════════════════════════════════════════════════════════════════════
     with sub_deepdive:
-        st.subheader("Part Deep Dive")
-        st.caption("Select a tool to see full performance breakdown across every machine it has run on, including period analysis and copy group comparison.")
+        st.subheader("Tool Deep Dive")
+        st.caption("Full performance breakdown for a single tool across every machine it has run on.")
 
         all_tools_dd = sorted(fit_df['tool_id'].unique())
 
@@ -2154,14 +2175,17 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
 
             # ── Metric cards per machine ──────────────────────────────────────
             st.markdown("#### Machine Comparison Cards")
-            st.caption("**vs Others** = how this tool's cap efficiency compares to the average of all tools that have run on that machine.")
+            st.caption(
+                "**vs Other Tools on this Machine** = cap efficiency of this tool "
+                "minus the average cap efficiency of all other tools that have run on that same machine."
+            )
             card_cols = st.columns(min(n_mach, 4))
             for i, (_, row) in enumerate(tool_fit.iterrows()):
                 col = card_cols[i % min(n_mach, 4)]
                 score = row['fit_score']
                 bcolor = C['green'] if score >= 70 else (C['orange'] if score >= 45 else C['red'])
                 vs = row.get('vs_machine_avg', np.nan)
-                vs_str = f"{vs:+.1f}%" if pd.notna(vs) else "n/a"
+                vs_str = f"{vs:+.0f}%" if pd.notna(vs) else "n/a"
                 vs_color = C['green'] if (pd.notna(vs) and vs > 0) else (C['red'] if (pd.notna(vs) and vs < 0) else '#aaa')
                 with col:
                     st.markdown(f"""
@@ -2169,11 +2193,11 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                         <b style="color:{bcolor};font-size:1.05em">{row['machine_id']}</b><br>
                         <span style="font-size:1.6em;font-weight:bold">{score:.0f}</span>
                         <span style="font-size:0.75em;color:#aaa">/100</span><br>
-                        <span style="font-size:0.78em">Cap Eff: {row['cap_efficiency_pct']:.1f}%</span><br>
-                        <span style="font-size:0.78em">Stability: {row['stability_pct']:.1f}%</span><br>
-                        <span style="font-size:0.78em">Prod Hrs: {row['production_hrs']:,.0f}</span><br>
+                        <span style="font-size:0.78em">Cap Eff: {row['cap_efficiency_pct']:.0f}%</span><br>
+                        <span style="font-size:0.78em">Stability: {row['stability_pct']:.0f}%</span><br>
+                        <span style="font-size:0.78em">Prod Hrs: {row['production_hrs']:.0f}</span><br>
                         <span style="font-size:0.78em">Parts: {row['total_parts']:,.0f}</span><br>
-                        <span style="font-size:0.78em;color:{vs_color}">vs Others: {vs_str}</span>
+                        <span style="font-size:0.78em;color:{vs_color}">vs Other Tools: {vs_str}</span>
                     </div>""", unsafe_allow_html=True)
 
             # ── Heatmap ───────────────────────────────────────────────────────
@@ -2208,23 +2232,25 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
 
             # ── Session Period Breakdown ───────────────────────────────────────
             if 'session_period' in df_processed_global.columns:
-                st.markdown("#### Performance by Time Period")
-                st.caption("Morning 06–14h · Afternoon 14–22h · Night 22–06h")
+                shift_cfg = st.session_state.get('shift_config',
+                    [("Shift 1",6,14),("Shift 2",14,22),("Shift 3",22,6)])
+                shift_label = " · ".join(
+                    f"{n} {s:02d}:00–{e:02d}:00" for n,s,e in shift_cfg
+                )
+                st.markdown("#### Performance by Shift")
+                st.caption(shift_label)
                 tool_sessions = df_processed_global[
                     df_processed_global['tool_id'] == dd_tool
                 ].copy()
                 if not tool_sessions.empty and 'session_period' in tool_sessions.columns:
                     period_agg = tool_sessions[tool_sessions['stop_flag']==0].groupby(
                         ['machine_id','session_period']
-                    ).agg(
-                        shots   =('actual_ct','count'),
-                        avg_ct  =('actual_ct','mean'),
-                    ).round(2).reset_index()
+                    ).agg(avg_ct=('actual_ct','mean')).round(1).reset_index()
                     if not period_agg.empty:
                         pv_period = pd.pivot_table(
                             period_agg, values='avg_ct',
                             index='machine_id', columns='session_period', aggfunc='mean'
-                        ).round(2)
+                        ).round(1)
                         st.dataframe(pv_period, use_container_width=True)
 
             # ── Copy group bar compare ────────────────────────────────────────

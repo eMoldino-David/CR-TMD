@@ -1810,24 +1810,35 @@ def load_tmd_log(file) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def assign_machine_from_tmd(df_shots: pd.DataFrame, df_tmd: pd.DataFrame) -> pd.DataFrame:
+def assign_machine_from_tmd(df_shots: pd.DataFrame, df_tmd: pd.DataFrame,
+                            shift_config: list = None) -> pd.DataFrame:
     """
     Joins shots to TMD sessions by timestamp window.
-    Adds: machine_id, session_id, session_period (Morning/Afternoon/Night).
+    Adds: machine_id, session_id, session_period (from shift_config or default 3-shift).
+    shift_config: list of (name, start_hr, end_hr) tuples.
     """
     if df_tmd.empty or df_shots.empty:
         return df_shots
+
+    # Default: 3 shifts from 06:00
+    if not shift_config:
+        shift_config = [("Shift 1", 6, 14), ("Shift 2", 14, 22), ("Shift 3", 22, 6)]
+
+    def _period(dt):
+        h = dt.hour
+        for name, start, end in shift_config:
+            if start < end:
+                if start <= h < end:
+                    return name
+            else:  # wraps midnight
+                if h >= start or h < end:
+                    return name
+        return shift_config[0][0]
 
     df_shots = df_shots.copy()
     df_shots["machine_id"]     = None
     df_shots["session_id"]     = None
     df_shots["session_period"] = None
-
-    def _period(dt):
-        h = dt.hour
-        if 6 <= h < 14:  return "Morning"
-        if 14 <= h < 22: return "Afternoon"
-        return "Night"
 
     session_counter = 0
     for machine_id, grp in df_tmd.groupby("Machine ID"):
