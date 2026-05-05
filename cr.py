@@ -1607,26 +1607,23 @@ def main():
     #     render_forecast_tab(df_tool_scope, config, df_logistics,
     #                         working_days_per_week, working_hours_per_day)
 
-try:
-    @st.dialog("📊 Capacity Risk Analysis — Optimal Pairing", width="large")
-    def _cr_pairing_dialog():
-        """Modal popup: runs CR analysis on a specific tool-machine pairing."""
-        tool_id    = st.session_state.get('cr_dialog_tool')
-        machine_id = st.session_state.get('cr_dialog_machine')
-        df_proc    = st.session_state.get('cr_dialog_df_proc', pd.DataFrame())
-        config     = st.session_state.get('cr_dialog_config', {})
+def _cr_pairing_dialog_body():
+    """Shared body for CR analysis popup."""
+    tool_id    = st.session_state.get('cr_dialog_tool')
+    machine_id = st.session_state.get('cr_dialog_machine')
+    df_proc    = st.session_state.get('cr_dialog_df_proc', pd.DataFrame())
+    config     = st.session_state.get('cr_dialog_config', {})
 
     if not tool_id or df_proc.empty:
         st.warning("No data available for this pairing.")
         return
 
-    st.markdown(f"**Tool:** {tool_id} &nbsp;|&nbsp; **Machine:** {machine_id}")
+    st.markdown(f"**Tool:** {tool_id} &nbsp;|&nbsp; **Machine:** {machine_id or 'All machines'}")
     st.caption("Results based on all historical sessions of this tool on this machine.")
 
-    # Filter to this specific tool-machine pair
-    mask = (df_proc['tool_id'].astype(str) == str(tool_id))
+    mask = df_proc['tool_id'].astype(str) == str(tool_id)
     if machine_id and 'machine_id' in df_proc.columns:
-        mask &= (df_proc['machine_id'].astype(str) == str(machine_id))
+        mask &= df_proc['machine_id'].astype(str) == str(machine_id)
     pair_df = df_proc[mask].copy()
 
     if pair_df.empty or len(pair_df) < 5:
@@ -1641,18 +1638,12 @@ try:
             st.error(f"Analysis failed: {e}")
             return
 
-    # ── KPI strip ────────────────────────────────────────────────────────────
     cap_eff = res.get('capacity_efficiency', 0) * 100
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Cap Efficiency",
-              f"{cap_eff:.0f}%",
-              delta=f"{cap_eff-100:.0f} pp vs optimal")
-    k2.metric("Stability",
-              f"{res.get('stability_index', 0):.0f}%")
-    k3.metric("MTBF",
-              f"{res.get('mtbf_min', 0):.0f} min")
-    k4.metric("MTTR",
-              f"{res.get('mttr_min', 0):.1f} min")
+    k1.metric("Cap Efficiency", f"{cap_eff:.0f}%", delta=f"{cap_eff-100:.0f} pp vs optimal")
+    k2.metric("Stability",      f"{res.get('stability_index', 0):.0f}%")
+    k3.metric("MTBF",           f"{res.get('mtbf_min', 0):.0f} min")
+    k4.metric("MTTR",           f"{res.get('mttr_min', 0):.1f} min")
 
     s1, s2, s3, s4 = st.columns(4)
     s1.metric("Optimal Output",  f"{res.get('optimal_output_parts', 0):,.0f} parts")
@@ -1661,47 +1652,21 @@ try:
     s4.metric("Slow Cycle Loss", f"{res.get('capacity_loss_slow_parts',     0):,.0f} parts")
 
     st.markdown("---")
-
-    # ── Waterfall ─────────────────────────────────────────────────────────────
     try:
         fig_wf = cr_CG_utils.plot_waterfall(res, benchmark_mode="Optimal")
         st.plotly_chart(fig_wf, use_container_width=True, key="dialog_waterfall")
     except Exception:
         st.info("Waterfall chart unavailable for this dataset.")
 
-except AttributeError:
-    # st.dialog not available on this Streamlit version — use expander fallback
+
+try:
+    @st.dialog("📊 Capacity Risk Analysis — Optimal Pairing", width="large")
     def _cr_pairing_dialog():
-        tool_id    = st.session_state.get('cr_dialog_tool')
-        machine_id = st.session_state.get('cr_dialog_machine')
-        df_proc    = st.session_state.get('cr_dialog_df_proc', pd.DataFrame())
-        config     = st.session_state.get('cr_dialog_config', {})
-        if not tool_id or df_proc.empty:
-            st.warning("No data available.")
-            return
-        mask = df_proc['tool_id'].astype(str) == str(tool_id)
-        if machine_id:
-            mask &= df_proc['machine_id'].astype(str) == str(machine_id)
-        pair_df = df_proc[mask].copy()
-        if pair_df.empty or len(pair_df) < 5:
-            st.warning("Not enough data for this pairing.")
-            return
-        try:
-            calc = cr_CG_utils.CapacityRiskCalculator(pair_df, **config)
-            res  = calc.results
-            k1,k2,k3,k4 = st.columns(4)
-            cap_eff = res.get('capacity_efficiency',0)*100
-            k1.metric("Cap Efficiency", f"{cap_eff:.0f}%")
-            k2.metric("Stability",      f"{res.get('stability_index',0):.0f}%")
-            k3.metric("MTBF",           f"{res.get('mtbf_min',0):.0f} min")
-            k4.metric("MTTR",           f"{res.get('mttr_min',0):.1f} min")
-            try:
-                fig_wf = cr_CG_utils.plot_waterfall(res, benchmark_mode="Optimal")
-                st.plotly_chart(fig_wf, use_container_width=True)
-            except Exception:
-                pass
-        except Exception as e:
-            st.error(f"Analysis failed: {e}")
+        _cr_pairing_dialog_body()
+except AttributeError:
+    def _cr_pairing_dialog():
+        with st.expander("📊 CR Analysis Result", expanded=True):
+            _cr_pairing_dialog_body()
 
 
 def render_machine_fit_tab(df_processed_global, config, machine_master=None, tools_ref=None, key_suffix=''):
