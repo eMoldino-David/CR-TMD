@@ -1607,13 +1607,14 @@ def main():
     #     render_forecast_tab(df_tool_scope, config, df_logistics,
     #                         working_days_per_week, working_hours_per_day)
 
-@st.dialog("📊 Capacity Risk Analysis — Optimal Pairing", width="large")
-def _cr_pairing_dialog():
-    """Modal popup: runs CR analysis on a specific tool-machine pairing."""
-    tool_id    = st.session_state.get('cr_dialog_tool')
-    machine_id = st.session_state.get('cr_dialog_machine')
-    df_proc    = st.session_state.get('cr_dialog_df_proc', pd.DataFrame())
-    config     = st.session_state.get('cr_dialog_config', {})
+try:
+    @st.dialog("📊 Capacity Risk Analysis — Optimal Pairing", width="large")
+    def _cr_pairing_dialog():
+        """Modal popup: runs CR analysis on a specific tool-machine pairing."""
+        tool_id    = st.session_state.get('cr_dialog_tool')
+        machine_id = st.session_state.get('cr_dialog_machine')
+        df_proc    = st.session_state.get('cr_dialog_df_proc', pd.DataFrame())
+        config     = st.session_state.get('cr_dialog_config', {})
 
     if not tool_id or df_proc.empty:
         st.warning("No data available for this pairing.")
@@ -1667,6 +1668,40 @@ def _cr_pairing_dialog():
         st.plotly_chart(fig_wf, use_container_width=True, key="dialog_waterfall")
     except Exception:
         st.info("Waterfall chart unavailable for this dataset.")
+
+except AttributeError:
+    # st.dialog not available on this Streamlit version — use expander fallback
+    def _cr_pairing_dialog():
+        tool_id    = st.session_state.get('cr_dialog_tool')
+        machine_id = st.session_state.get('cr_dialog_machine')
+        df_proc    = st.session_state.get('cr_dialog_df_proc', pd.DataFrame())
+        config     = st.session_state.get('cr_dialog_config', {})
+        if not tool_id or df_proc.empty:
+            st.warning("No data available.")
+            return
+        mask = df_proc['tool_id'].astype(str) == str(tool_id)
+        if machine_id:
+            mask &= df_proc['machine_id'].astype(str) == str(machine_id)
+        pair_df = df_proc[mask].copy()
+        if pair_df.empty or len(pair_df) < 5:
+            st.warning("Not enough data for this pairing.")
+            return
+        try:
+            calc = cr_CG_utils.CapacityRiskCalculator(pair_df, **config)
+            res  = calc.results
+            k1,k2,k3,k4 = st.columns(4)
+            cap_eff = res.get('capacity_efficiency',0)*100
+            k1.metric("Cap Efficiency", f"{cap_eff:.0f}%")
+            k2.metric("Stability",      f"{res.get('stability_index',0):.0f}%")
+            k3.metric("MTBF",           f"{res.get('mtbf_min',0):.0f} min")
+            k4.metric("MTTR",           f"{res.get('mttr_min',0):.1f} min")
+            try:
+                fig_wf = cr_CG_utils.plot_waterfall(res, benchmark_mode="Optimal")
+                st.plotly_chart(fig_wf, use_container_width=True)
+            except Exception:
+                pass
+        except Exception as e:
+            st.error(f"Analysis failed: {e}")
 
 
 def render_machine_fit_tab(df_processed_global, config, machine_master=None, tools_ref=None, key_suffix=''):
@@ -2498,17 +2533,6 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                             )
             elif 'session_period' not in df_processed_global.columns:
                 st.caption("Upload TMD log to enable shift breakdown.")
-
-        all_groups_dd = sorted({v for v in copy_map.values() if v})
-        all_tools_dd  = sorted(fit_df['tool_id'].unique())
-
-        if all_groups_dd:
-            dd_part = st.selectbox("Select Part", all_groups_dd, key=f"dd_part{key_suffix}")
-            dd_tool_ids = [t for t in all_tools_dd if copy_map.get(t) == dd_part]
-        else:
-            # No copy groups — fall back to individual tool
-            dd_part = st.selectbox("Select Tool", all_tools_dd, key=f"dd_part{key_suffix}")
-            dd_tool_ids = [dd_part]
 
 if __name__ == "__main__":
     main()
