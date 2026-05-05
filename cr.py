@@ -1792,15 +1792,12 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
 
                     sc_disp = scorecard[['rank','supplier_id','total_tools','total_machines',
                                           'total_parts','production_hrs','avg_cap_eff',
-                                          'avg_stability','avg_mtbf','avg_mttr',
-                                          'best_machine','worst_machine']].rename(columns={
+                                          'avg_stability','avg_mtbf','avg_mttr']].rename(columns={
                         'rank':'#','supplier_id':'Supplier','total_tools':'Tools',
                         'total_machines':'Machines','total_parts':'Parts',
-                        'production_hrs':'Prod Hrs','avg_cap_eff':'Cap Eff %',
+                        'production_hrs':'Prod Hrs','avg_cap_eff':'Cap Efficiency %',
                         'avg_stability':'Stability %','avg_mtbf':'MTBF (min)',
                         'avg_mttr':'MTTR (min)',
-                        'best_machine':'Best Machine-Tool Match',
-                        'worst_machine':'Worst Machine-Tool Match',
                     })
                     def _style_sc(row):
                         styles = [''] * len(row)
@@ -1851,7 +1848,7 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
         all_tools_pc  = sorted(fit_df['tool_id'].unique())
         all_groups_pc = sorted({v for v in copy_map.values() if v})
 
-        pc_mode = st.radio("Select by", ["Individual Tool", "Part (Copy Group)"],
+        pc_mode = st.radio("Select by", ["Part (Copy Group)", "Individual Tool"],
                            horizontal=True, key=f"pc_mode{key_suffix}")
 
         if pc_mode == "Part (Copy Group)" and all_groups_pc:
@@ -1865,11 +1862,87 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
             sel_tool_ids = [sel_tool]
             label = _tlabel(sel_tool)
 
-        # Recent vs historical toggle
         recent_days = st.slider("'Recent' window (days)", 7, 90, 30,
                                 key=f"pc_recent{key_suffix}")
 
         st.markdown(f"**{label}**")
+
+        # ── Best machine per tool — shown first ───────────────────────────────
+        if len(sel_tool_ids) > 1:
+            st.markdown("#### Best Machine Recommendation — Per Tool")
+            st.caption(
+                "Each copy tool may perform better on a different machine. "
+                "Recommended machine shown with its best historical period."
+            )
+            rec_rows = []
+            for tid in sel_tool_ids:
+                tool_data = fit_df[fit_df['tool_id'] == tid]
+                if tool_data.empty:
+                    continue
+                best_row  = tool_data.loc[tool_data['cap_efficiency_pct'].idxmax()]
+                worst_row = tool_data.loc[tool_data['cap_efficiency_pct'].idxmin()]
+                pph = (best_row['total_parts'] / best_row['production_hrs']
+                       if best_row['production_hrs'] > 0 else 0)
+
+                # Best historical period for this tool-machine pair
+                best_period = None
+                if 'session_period' in df_processed_global.columns:
+                    sub = df_processed_global[
+                        (df_processed_global['tool_id'] == tid) &
+                        (df_processed_global['machine_id'] == best_row['machine_id']) &
+                        (df_processed_global['stop_flag'] == 0)
+                    ]
+                    if not sub.empty:
+                        period_eff = sub.groupby('session_period')['actual_ct'].mean()
+                        approved = float(sub['approved_ct'].iloc[0])
+                        # Best period = closest to approved CT on average
+                        best_period = (period_eff - approved).abs().idxmin()
+
+                rec_rows.append({
+                    'tool_id':          tid,
+                    'best_machine':     best_row['machine_id'],
+                    'best_cap_eff':     best_row['cap_efficiency_pct'],
+                    'best_stability':   best_row['stability_pct'],
+                    'best_parts_per_hr': round(pph, 0),
+                    'best_fit_score':   best_row['fit_score'],
+                    'best_period':      best_period or '—',
+                    'worst_machine':    worst_row['machine_id'],
+                    'worst_cap_eff':    worst_row['cap_efficiency_pct'],
+                    'machines_tested':  len(tool_data),
+                    'vs_worst_pp':      round(best_row['cap_efficiency_pct'] - worst_row['cap_efficiency_pct'], 0),
+                })
+
+            if rec_rows:
+                card_cols_top = st.columns(min(len(rec_rows), 3))
+                for i, r in enumerate(rec_rows):
+                    with card_cols_top[i % min(len(rec_rows), 3)]:
+                        has_compare = r['machines_tested'] > 1
+                        avoid_html = (
+                            f'<span style="color:{C["red"]};font-size:0.82em">'
+                            f'⚠️ Avoid: {r["worst_machine"]} '
+                            f'({r["worst_cap_eff"]:.0f}% — {r["vs_worst_pp"]:+.0f} pp)</span>'
+                            if has_compare else
+                            '<span style="font-size:0.8em;color:#aaa">Only tested on one machine</span>'
+                        )
+                        st.markdown(f"""
+                        <div style="background:#1a1a2e;border:1px solid {C['green']};
+                                    border-radius:8px;padding:14px;margin-bottom:8px">
+                            <b style="color:{C['green']};font-size:1.05em">{r['tool_id']}</b>
+                            <span style="color:#aaa;font-size:0.8em">
+                                &nbsp;— {int(r['machines_tested'])} machine{'s' if r['machines_tested']!=1 else ''} tested
+                            </span><br><br>
+                            <b>✅ Best: {r['best_machine']}</b><br>
+                            <span style="font-size:0.85em">
+                                Cap Eff: <b>{r['best_cap_eff']:.0f}%</b> &nbsp;|&nbsp;
+                                Stability: {r['best_stability']:.0f}%<br>
+                                Parts/hr: {r['best_parts_per_hr']:.0f} &nbsp;|&nbsp;
+                                Fit Score: {r['best_fit_score']:.0f}/100<br>
+                                Best Period: <b>{r['best_period']}</b>
+                            </span><br><br>
+                            {avoid_html}
+                        </div>""", unsafe_allow_html=True)
+
+            st.markdown("---")
 
         pc = cr_CG_utils.compute_press_compare(
             fit_df, sel_tool_ids, df_processed_global, recent_days
@@ -1991,97 +2064,6 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
             )
             st.plotly_chart(fig_rank, use_container_width=True, key=f"pc_rank{key_suffix}")
 
-            # ── Best machine per tool (copy group only) ───────────────────────
-            if len(sel_tool_ids) > 1:
-                st.markdown("---")
-                st.markdown("#### Best Machine Recommendation — Per Tool in This Part Group")
-                st.caption(
-                    "Each copy tool may perform better on a different machine. "
-                    "This shows the individually recommended machine for each tool "
-                    "based on its own historical cap efficiency."
-                )
-
-                rec_rows = []
-                for tid in sel_tool_ids:
-                    tool_data = fit_df[fit_df['tool_id'] == tid]
-                    if tool_data.empty:
-                        continue
-                    best_row  = tool_data.loc[tool_data['cap_efficiency_pct'].idxmax()]
-                    worst_row = tool_data.loc[tool_data['cap_efficiency_pct'].idxmin()]
-                    pph = (best_row['total_parts'] / best_row['production_hrs']
-                           if best_row['production_hrs'] > 0 else 0)
-                    rec_rows.append({
-                        'tool_id':   tid,
-                        'best_machine':     best_row['machine_id'],
-                        'best_cap_eff':     best_row['cap_efficiency_pct'],
-                        'best_stability':   best_row['stability_pct'],
-                        'best_parts_per_hr': round(pph, 0),
-                        'best_fit_score':   best_row['fit_score'],
-                        'worst_machine':    worst_row['machine_id'],
-                        'worst_cap_eff':    worst_row['cap_efficiency_pct'],
-                        'machines_tested':  len(tool_data),
-                        'vs_worst_pp':      round(best_row['cap_efficiency_pct'] - worst_row['cap_efficiency_pct'], 0),
-                    })
-
-                if rec_rows:
-                    # Recommendation cards — one per tool
-                    card_cols_cg = st.columns(min(len(rec_rows), 3))
-                    for i, r in enumerate(rec_rows):
-                        with card_cols_cg[i % min(len(rec_rows), 3)]:
-                            st.markdown(f"""
-                            <div style="background:#1a1a2e;border:1px solid {C['green']};
-                                        border-radius:8px;padding:14px;margin-bottom:8px">
-                                <b style="color:{C['green']};font-size:1.0em">
-                                    {r['tool_id']}
-                                </b><br>
-                                <span style="color:#aaa;font-size:0.8em">
-                                    {int(r['machines_tested'])} machine{'s' if r['machines_tested']!=1 else ''} tested
-                                </span><br><br>
-                                <b>✅ Best: {r['best_machine']}</b><br>
-                                <span style="font-size:0.85em">
-                                    Cap Eff: <b>{r['best_cap_eff']:.0f}%</b> &nbsp;|&nbsp;
-                                    Stability: {r['best_stability']:.0f}%<br>
-                                    Parts/hr: {r['best_parts_per_hr']:.0f} &nbsp;|&nbsp;
-                                    Fit Score: {r['best_fit_score']:.0f}/100
-                                </span><br><br>
-                                <span style="color:{C['red']};font-size:0.85em">
-                                    ⚠️ Avoid: {r['worst_machine']}
-                                    ({r['worst_cap_eff']:.0f}% — {r['vs_worst_pp']:+.0f} pp vs best)
-                                </span>
-                            </div>""", unsafe_allow_html=True)
-
-                    # Summary comparison table
-                    rec_df_disp = pd.DataFrame(rec_rows)[[
-                        'tool_id','best_machine','best_cap_eff','best_stability',
-                        'best_parts_per_hr','best_fit_score','worst_machine',
-                        'worst_cap_eff','vs_worst_pp','machines_tested'
-                    ]].rename(columns={
-                        'tool_id':'Tool','best_machine':'Best Machine',
-                        'best_cap_eff':'Best Cap Eff %','best_stability':'Best Stability %',
-                        'best_parts_per_hr':'Best Parts/hr','best_fit_score':'Fit Score',
-                        'worst_machine':'Avoid Machine','worst_cap_eff':'Worst Cap Eff %',
-                        'vs_worst_pp':'Spread (pp)','machines_tested':'Machines Tested',
-                    })
-
-                    def _style_cg_rec(row):
-                        styles = [''] * len(row)
-                        for i, col in enumerate(rec_df_disp.columns):
-                            if col == 'Best Cap Eff %':
-                                styles[i] = f'color:{C["green"]};font-weight:bold'
-                            elif col == 'Worst Cap Eff %':
-                                styles[i] = f'color:{C["red"]}'
-                            elif col == 'Spread (pp)':
-                                styles[i] = f'color:{C["orange"]}' if row[col] > 5 else ''
-                        return styles
-
-                    st.dataframe(
-                        rec_df_disp.style.apply(_style_cg_rec, axis=1)
-                        .format({'Best Cap Eff %':'{:.0f}%','Best Stability %':'{:.0f}%',
-                                 'Worst Cap Eff %':'{:.0f}%','Best Parts/hr':'{:.0f}',
-                                 'Fit Score':'{:.0f}','Spread (pp)':'{:+.0f} pp'}, na_rep='—'),
-                        use_container_width=True, hide_index=True
-                    )
-    # ══════════════════════════════════════════════════════════════════════════
     with sub_pairings:
         st.subheader("Optimal Machine-Tool Pairings")
         st.caption(
