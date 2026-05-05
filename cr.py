@@ -2094,6 +2094,12 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
         if recs_df.empty:
             st.warning("Not enough data to generate pairings.")
         else:
+            # Compatibility: cap_eff_gain added in latest cr_utils; fall back to cap_eff_spread
+            if 'cap_eff_gain' not in recs_df.columns:
+                recs_df['cap_eff_gain'] = recs_df['cap_eff_spread']
+            if 'worst_parts_per_hr' not in recs_df.columns:
+                recs_df['worst_parts_per_hr'] = 0.0
+
             r1, r2 = st.columns(2)
             r1.metric("Machines with Data", f"{len(recs_df)}")
             r2.metric("Total Cap Eff Gain Potential",

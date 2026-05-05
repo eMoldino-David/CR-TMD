@@ -2190,9 +2190,10 @@ def compute_recommendations(fit_df: pd.DataFrame) -> pd.DataFrame:
             'worst_tool':           worst['tool_id'],
             'worst_supplier':       worst['supplier_id'],
             'worst_cap_eff':        round(worst['cap_efficiency_pct'], 1),
+            'worst_parts_per_hr':   round(worst_pph, 1),
             'tools_compared':       len(grp),
             'cap_eff_spread':       round(best['cap_efficiency_pct'] - worst['cap_efficiency_pct'], 1),
-            'parts_gain_best_vs_worst': round(best_pph - worst_pph, 1),
+            'cap_eff_gain':         round(best['cap_efficiency_pct'] - worst['cap_efficiency_pct'], 1),
         }
 
         if swap_tool is not None and swap_tool['tool_id'] != best['tool_id']:
@@ -2459,7 +2460,7 @@ def generate_weekly_report(fit_df: pd.DataFrame,
     _write_sheet(ws_rec, recs_df[[c for c in [
         'machine_id','best_tool','best_supplier','best_cap_eff','best_parts_per_hr',
         'worst_tool','worst_supplier','worst_cap_eff','tools_compared','cap_eff_spread',
-        'parts_gain_best_vs_worst'] if c in recs_df.columns]] if not recs_df.empty else pd.DataFrame(),
+        'cap_eff_gain'] if c in recs_df.columns]] if not recs_df.empty else pd.DataFrame(),
         title="Optimal Machine-Tool Pairings")
 
     # ── Sheet 5: Machine Rankings ─────────────────────────────────────────────
