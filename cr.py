@@ -2392,18 +2392,36 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
             if not insights:
                 st.info("No significant patterns detected for this part in the selected date range.")
             else:
-                for ins in insights:
+                for idx, ins in enumerate(insights):
                     color  = SEVERITY_COLOR.get(ins['severity'], C['blue'])
                     icon   = SEVERITY_ICON.get(ins['severity'], '🔵')
                     rule   = ins['rule'].replace('_', ' ').title()
+                    ins_tool    = ins.get('tool_id')
+                    ins_machine = ins.get('machine_id')
+
                     st.markdown(f"""
                     <div style="background:#1a1a2e;border-left:4px solid {color};
-                                border-radius:6px;padding:12px 16px;margin-bottom:8px">
+                                border-radius:6px;padding:12px 16px;margin-bottom:4px">
                         <span style="font-size:0.75em;color:{color};text-transform:uppercase;
                                      letter-spacing:0.05em">{icon} {rule}</span><br>
                         <b style="font-size:0.95em">{ins['title']}</b><br>
                         <span style="font-size:0.85em;color:#ccc">{ins['detail']}</span>
                     </div>""", unsafe_allow_html=True)
+
+                    if ins_tool:
+                        btn_label = (
+                            f"📊 Analyse {ins_tool}"
+                            + (f" on {ins_machine}" if ins_machine else "")
+                        )
+                        btn_key = f"ins_cr_{idx}_{ins['rule']}_{key_suffix}"
+                        if st.button(btn_label, key=btn_key):
+                            st.session_state['cr_dialog_tool']    = ins_tool
+                            st.session_state['cr_dialog_machine'] = ins_machine
+                            st.session_state['cr_dialog_df_proc'] = part_proc if not part_proc.empty else df_processed_global
+                            st.session_state['cr_dialog_config']  = config
+                            _cr_pairing_dialog()
+
+                    st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
 
             st.markdown("---")
 

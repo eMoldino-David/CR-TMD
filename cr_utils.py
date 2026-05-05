@@ -2525,6 +2525,7 @@ def run_part_analysis(
             insights.append({
                 'rule': 'consistency',
                 'severity': 'high',
+                'tool_id': tid, 'machine_id': best_m,
                 'title': f"{tid} — High machine-dependency ({cap_range:.0f} pp spread)",
                 'detail': (
                     f"{tid} performs very differently depending on which machine it runs on. "
@@ -2537,6 +2538,7 @@ def run_part_analysis(
             insights.append({
                 'rule': 'consistency',
                 'severity': 'medium',
+                'tool_id': tid, 'machine_id': best_m,
                 'title': f"{tid} — Moderate machine sensitivity ({cap_range:.0f} pp spread)",
                 'detail': (
                     f"{tid} shows a {cap_range:.0f} pp range across machines "
@@ -2581,6 +2583,7 @@ def run_part_analysis(
                     insights.append({
                         'rule': 'shift_degradation',
                         'severity': 'high',
+                        'tool_id': tid, 'machine_id': mid,
                         'title': f"{tid} / {mid} — Shift degradation detected ({drop:.0f} pp)",
                         'detail': (
                             f"{tid} on {mid} drops {drop:.0f} pp between best and worst shift. "
@@ -2593,6 +2596,7 @@ def run_part_analysis(
                     insights.append({
                         'rule': 'shift_degradation',
                         'severity': 'medium',
+                        'tool_id': tid, 'machine_id': mid,
                         'title': f"{tid} / {mid} — Shift variation ({drop:.0f} pp)",
                         'detail': (
                             f"{tid} on {mid} shows {drop:.0f} pp variation across shifts "
@@ -2621,6 +2625,7 @@ def run_part_analysis(
                 insights.append({
                     'rule': 'underutilised',
                     'severity': 'medium',
+                    'tool_id': tid, 'machine_id': tested_m,
                     'title': f"{tid} — Only tested on one machine",
                     'detail': (
                         f"{tid} has only ever run on {tested_m} ({tested_v:.0f}% cap eff). "
@@ -2660,6 +2665,7 @@ def run_part_analysis(
                 insights.append({
                     'rule': 'best_window',
                     'severity': 'info',
+                    'tool_id': r['tool_id'], 'machine_id': r['machine_id'],
                     'title': f"Peak performance: {r['tool_id']} on {r['machine_id']} — {r['eff']:.0f}% cap eff",
                     'detail': (
                         f"Best recorded production window: {r['start']} → {r['end']} "
@@ -2680,6 +2686,7 @@ def run_part_analysis(
                 insights.append({
                     'rule': 'sibling_divergence',
                     'severity': 'high',
+                    'tool_id': worst_tool, 'machine_id': None,
                     'title': f"Copy tool divergence — {gap:.0f} pp gap between {best_tool} and {worst_tool}",
                     'detail': (
                         f"{best_tool} averages {tool_avgs[best_tool]:.0f}% cap efficiency across all machines, "
@@ -2693,6 +2700,7 @@ def run_part_analysis(
                 insights.append({
                     'rule': 'sibling_divergence',
                     'severity': 'medium',
+                    'tool_id': worst_tool, 'machine_id': None,
                     'title': f"Copy tool gap — {gap:.0f} pp between {best_tool} and {worst_tool}",
                     'detail': (
                         f"{best_tool} ({tool_avgs[best_tool]:.0f}%) is outperforming "
@@ -2731,6 +2739,7 @@ def run_part_analysis(
                     insights.append({
                         'rule': 'stagnation',
                         'severity': 'high',
+                        'tool_id': tid, 'machine_id': mid,
                         'title': f"{tid} / {mid} — Declining performance ({trend:.0f} pp trend)",
                         'detail': (
                             f"{tid} on {mid} is declining over time. "
@@ -2744,6 +2753,7 @@ def run_part_analysis(
                     insights.append({
                         'rule': 'stagnation',
                         'severity': 'medium',
+                        'tool_id': tid, 'machine_id': mid,
                         'title': f"{tid} / {mid} — Gradual decline ({trend:.0f} pp trend)",
                         'detail': (
                             f"{tid} on {mid} shows a gradual downward trend across {len(effs)} runs "
@@ -2754,6 +2764,7 @@ def run_part_analysis(
                     insights.append({
                         'rule': 'stagnation',
                         'severity': 'info',
+                        'tool_id': tid, 'machine_id': mid,
                         'title': f"{tid} / {mid} — No improvement across {len(effs)} runs",
                         'detail': (
                             f"{tid} on {mid} has shown no meaningful change across {len(effs)} runs "
