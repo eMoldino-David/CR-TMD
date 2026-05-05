@@ -2321,191 +2321,109 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
             )
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 4 — TOOL DEEP DIVE
+    # TAB 4 — PART DEEP DIVE
     # ══════════════════════════════════════════════════════════════════════════
     with sub_deepdive:
-        st.subheader("Tool Deep Dive")
-        st.caption("Full performance breakdown for a single tool across every machine it has run on.")
+        st.subheader("Part Deep Dive")
 
-        all_tools_dd = sorted(fit_df['tool_id'].unique())
+        all_groups_dd = sorted({v for v in copy_map.values() if v})
+        all_tools_dd  = sorted(fit_df['tool_id'].unique())
 
-        def _tool_label_dd(tid):
-            grp = copy_map.get(tid)
-            return f"{tid}  [Copy: {grp}]" if grp else tid
-
-        dd_tool = st.selectbox("Select Tool", all_tools_dd, format_func=_tool_label_dd,
-                                key=f"dd_tool{key_suffix}")
-
-        grp_name = copy_map.get(dd_tool)
-        siblings = [t for t in all_tools_dd if copy_map.get(t) == grp_name and t != dd_tool] if grp_name else []
-
-        if grp_name:
-            st.info(f"📋 **Copy Group: {grp_name}** — Siblings in data: {', '.join(siblings) if siblings else 'none'}")
+        if all_groups_dd:
+            dd_part = st.selectbox("Select Part", all_groups_dd, key=f"dd_part{key_suffix}")
+            dd_tool_ids = [t for t in all_tools_dd if copy_map.get(t) == dd_part]
         else:
-            st.caption("🔹 Single tool — no copy group")
+            # No copy groups — fall back to individual tool
+            dd_part = st.selectbox("Select Tool", all_tools_dd, key=f"dd_part{key_suffix}")
+            dd_tool_ids = [dd_part]
 
-        tool_fit = fit_df[fit_df['tool_id'] == dd_tool].copy()
-        tool_fit = tool_fit.sort_values('fit_score', ascending=False).reset_index(drop=True)
-
-        if machine_master is not None and not machine_master.empty:
-            id_col = next((c for c in machine_master.columns
-                           if c.strip().lower() in ('machine id','machine_id','machinecode')), None)
-            if id_col:
-                mm = machine_master.rename(columns={id_col: 'machine_id'})
-                meta_cols = ['machine_id'] + [c for c in
-                    ['Machine Maker','Machine Type','Machine Model',
-                     'Machine Tonnage (ton)','Plant ID','Line'] if c in mm.columns]
-                tool_fit = tool_fit.merge(mm[meta_cols], on='machine_id', how='left')
-
-        n_mach = len(tool_fit)
-        if n_mach < 1:
-            st.warning("No data for this tool.")
+        if not dd_tool_ids:
+            st.warning("No data for this part.")
         else:
-            # Compute vs-machine-average for each row
-            machine_avg = fit_df.groupby('machine_id')['cap_efficiency_pct'].mean()
-            tool_fit['vs_machine_avg'] = (
-                tool_fit['cap_efficiency_pct'] -
-                tool_fit['machine_id'].map(machine_avg)
-            ).round(1)
+            dd_fit = fit_df[fit_df['tool_id'].isin(dd_tool_ids)].copy()
 
-            # ── Metric cards per machine ──────────────────────────────────────
-            st.markdown("#### Machine Comparison Cards")
-            st.caption(
-                "**vs Other Tools on this Machine** = cap efficiency of this tool "
-                "minus the average cap efficiency of all other tools that have run on that same machine."
-            )
-            card_cols = st.columns(min(n_mach, 4))
-            for i, (_, row) in enumerate(tool_fit.iterrows()):
-                col = card_cols[i % min(n_mach, 4)]
-                score = row['fit_score']
-                bcolor = C['green'] if score >= 70 else (C['orange'] if score >= 45 else C['red'])
-                vs = row.get('vs_machine_avg', np.nan)
-                vs_str = f"{vs:+.0f}%" if pd.notna(vs) else "n/a"
-                vs_color = C['green'] if (pd.notna(vs) and vs > 0) else (C['red'] if (pd.notna(vs) and vs < 0) else '#aaa')
-                with col:
-                    st.markdown(f"""
-                    <div style="background:#1a1a2e;border:1px solid {bcolor};border-radius:8px;padding:12px;margin-bottom:8px;text-align:center">
-                        <b style="color:{bcolor};font-size:1.05em">{row['machine_id']}</b><br>
-                        <span style="font-size:1.6em;font-weight:bold">{score:.0f}</span>
-                        <span style="font-size:0.75em;color:#aaa">/100</span><br>
-                        <span style="font-size:0.78em">Cap Eff: {row['cap_efficiency_pct']:.0f}%</span><br>
-                        <span style="font-size:0.78em">Stability: {row['stability_pct']:.0f}%</span><br>
-                        <span style="font-size:0.78em">Prod Hrs: {row['production_hrs']:.0f}</span><br>
-                        <span style="font-size:0.78em">Parts: {row['total_parts']:,.0f}</span><br>
-                        <span style="font-size:0.78em;color:{vs_color}">vs Other Tools: {vs_str}</span>
-                    </div>""", unsafe_allow_html=True)
-
-            # ── Heatmap ───────────────────────────────────────────────────────
-            st.markdown("#### Performance Heatmap")
-            fig_hm = cr_CG_utils.plot_machine_fit_heatmap(tool_fit)
-            st.plotly_chart(fig_hm, use_container_width=True, key=f"dd_heatmap{key_suffix}")
-
-            # ── Detail table ──────────────────────────────────────────────────
-            st.markdown("#### Full Detail Table")
-            base_cols = ['machine_id', 'fit_score', 'vs_machine_avg', 'runs',
-                         'production_hrs', 'total_parts',
-                         'cap_efficiency_pct', 'stability_pct',
-                         'avg_ct_sec', 'mtbf_min', 'mttr_min',
-                         'slow_loss_parts', 'fast_gain_parts',
-                         'stop_count', 'downtime_hrs']
-            meta_present = [c for c in ['Machine Maker','Machine Tonnage (ton)','Plant ID','Line']
-                            if c in tool_fit.columns]
-            dd_display = tool_fit[['machine_id'] + meta_present +
-                                  [c for c in base_cols if c != 'machine_id' and c in tool_fit.columns]
-                                 ].rename(columns={
-                'machine_id':'Machine','fit_score':'Fit Score',
-                'vs_machine_avg':'vs Others %',
-                'runs':'Runs','production_hrs':'Prod Hrs','total_parts':'Parts',
-                'cap_efficiency_pct':'Cap Eff %','stability_pct':'Stability %',
-                'avg_ct_sec':'Avg CT (s)',
-                'slow_loss_parts':'Slow Loss','fast_gain_parts':'Fast Gain',
-                'mtbf_min':'MTBF (min)','mttr_min':'MTTR (min)',
-                'stop_count':'Stops','downtime_hrs':'Downtime (h)',
-                'Machine Tonnage (ton)':'Tonnage',
-            })
-            st.dataframe(dd_display, use_container_width=True, hide_index=True)
-
-            # ── Session Period Breakdown ───────────────────────────────────────
-            if 'session_period' in df_processed_global.columns:
-                shift_cfg = st.session_state.get('shift_config',
-                    [("Shift 1",6,14),("Shift 2",14,22),("Shift 3",22,6)])
-                shift_label = " · ".join(
-                    f"{n} {s:02d}:00–{e:02d}:00" for n,s,e in shift_cfg
+            if dd_fit.empty:
+                st.warning("No machine data found for this part.")
+            else:
+                # ── Heatmap: machine × tool pairing ──────────────────────────
+                st.markdown("#### Performance Heatmap — Machine × Tool")
+                st.caption("Cap efficiency for each tool on each machine. Green = better. Blank = not yet tested.")
+                pv_hm = pd.pivot_table(
+                    dd_fit, values='cap_efficiency_pct',
+                    index='machine_id', columns='tool_id', aggfunc='mean'
+                ).round(0)
+                st.dataframe(
+                    pv_hm.style
+                        .background_gradient(cmap='RdYlGn', axis=None, vmin=70, vmax=105)
+                        .format('{:.0f}%', na_rep=''),
+                    use_container_width=True
                 )
-                st.markdown("#### Performance by Shift")
-                st.caption(shift_label)
-                tool_sessions = df_processed_global[
-                    df_processed_global['tool_id'] == dd_tool
-                ].copy()
-                if not tool_sessions.empty and 'session_period' in tool_sessions.columns:
-                    prod_shots = tool_sessions[tool_sessions['stop_flag'] == 0]
 
-                    # Cap Efficiency per machine per shift
-                    shift_rows = []
-                    for (mid, period), grp in tool_sessions.groupby(['machine_id','session_period']):
-                        prod = grp[grp['stop_flag'] == 0]
-                        dur = (grp['shot_time'].max() - grp['shot_time'].min()).total_seconds()
-                        rct = float(grp['approved_ct_for_run'].iloc[0]) if 'approved_ct_for_run' in grp.columns else float(grp['approved_ct'].iloc[0])
-                        rcav = float(grp['working_cavities'].max()) if 'working_cavities' in grp.columns else 1.0
-                        opt = (dur / rct) * rcav if rct > 0 and dur > 0 else 0
-                        act = float(prod['working_cavities'].sum()) if 'working_cavities' in prod.columns else float(len(prod))
-                        cap_eff = round(act / opt * 100, 1) if opt > 0 else None
-                        pph = round(act / (dur / 3600), 1) if dur > 0 else None
-                        shift_rows.append({
-                            'machine_id': mid, 'session_period': period,
-                            'cap_eff': cap_eff, 'parts_per_hr': pph,
-                            'shots': len(grp),
-                        })
+                st.markdown("---")
 
-                    if shift_rows:
-                        shift_df = pd.DataFrame(shift_rows)
-                        sv1, sv2 = st.tabs(["Cap Efficiency %", "Parts per Hour"])
+                # ── Performance by Shift: machine × tool pairing ─────────────
+                if 'session_period' in df_processed_global.columns:
+                    shift_cfg = st.session_state.get('shift_config',
+                        [("Shift 1",6,14),("Shift 2",14,22),("Shift 3",22,6)])
+                    shift_label = " · ".join(
+                        f"{n} {s:02d}:00–{e:02d}:00" for n,s,e in shift_cfg
+                    )
+                    st.markdown("#### Performance by Shift — Machine × Tool")
+                    st.caption(shift_label)
 
-                        with sv1:
-                            pv_eff = pd.pivot_table(
-                                shift_df, values='cap_eff',
-                                index='machine_id', columns='session_period', aggfunc='mean'
-                            ).round(1)
-                            st.dataframe(
-                                pv_eff.style
-                                    .background_gradient(cmap='RdYlGn', axis=None, vmin=70, vmax=105)
-                                    .format('{:.0f}%', na_rep='—'),
-                                use_container_width=True
-                            )
+                    part_sessions = df_processed_global[
+                        df_processed_global['tool_id'].isin(dd_tool_ids)
+                    ].copy()
 
-                        with sv2:
-                            pv_pph = pd.pivot_table(
-                                shift_df, values='parts_per_hr',
-                                index='machine_id', columns='session_period', aggfunc='mean'
-                            ).round(0)
-                            st.dataframe(
-                                pv_pph.style
-                                    .background_gradient(cmap='RdYlGn', axis=None)
-                                    .format('{:.0f}', na_rep='—'),
-                                use_container_width=True
-                            )
+                    if not part_sessions.empty and 'machine_id' in part_sessions.columns:
+                        shift_rows = []
+                        for (tid, mid, period), grp in part_sessions.groupby(
+                            ['tool_id', 'machine_id', 'session_period']
+                        ):
+                            prod = grp[grp['stop_flag'] == 0]
+                            dur  = (grp['shot_time'].max() - grp['shot_time'].min()).total_seconds()
+                            if dur <= 0:
+                                continue
+                            rct  = float(grp['approved_ct_for_run'].iloc[0]) if 'approved_ct_for_run' in grp.columns else float(grp['approved_ct'].iloc[0])
+                            rcav = float(grp['working_cavities'].max()) if 'working_cavities' in grp.columns else 1.0
+                            opt  = (dur / rct) * rcav if rct > 0 else 0
+                            act  = float(prod['working_cavities'].sum()) if 'working_cavities' in prod.columns else float(len(prod))
+                            shift_rows.append({
+                                'pairing':        f"{tid} / {mid}",
+                                'session_period': period,
+                                'cap_eff':        round(act / opt * 100, 0) if opt > 0 else None,
+                                'parts_per_hr':   round(act / (dur / 3600), 0) if dur > 0 else None,
+                            })
 
-            # ── Copy group bar compare ────────────────────────────────────────
-            if grp_name and siblings:
-                st.markdown(f"#### Copy Group Compare — {grp_name}")
-                all_in_group = [dd_tool] + siblings
-                group_fit = fit_df[fit_df['tool_id'].isin(all_in_group)].copy()
-                palette = [C['blue'], C['green'], C['orange']]
-                fig_cmp = go.Figure()
-                for i, tid in enumerate(all_in_group):
-                    tdf = group_fit[group_fit['tool_id'] == tid].sort_values('machine_id')
-                    if tdf.empty: continue
-                    fig_cmp.add_trace(go.Bar(
-                        name=tid, x=tdf['machine_id'], y=tdf['fit_score'],
-                        marker_color=palette[i % len(palette)], opacity=0.85,
-                        text=tdf['fit_score'].round(0).astype(int), textposition='outside',
-                    ))
-                fig_cmp.update_layout(
-                    barmode='group', title=f"Fit Score by Machine — {grp_name}",
-                    xaxis_title="Machine", yaxis_title="Fit Score (0–100)",
-                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-                )
-                st.plotly_chart(fig_cmp, use_container_width=True, key=f"dd_cmp{key_suffix}")
+                        if shift_rows:
+                            shift_df = pd.DataFrame(shift_rows)
+                            sv1, sv2 = st.tabs(["Cap Efficiency %", "Parts per Hour"])
+
+                            with sv1:
+                                pv_eff = pd.pivot_table(
+                                    shift_df, values='cap_eff',
+                                    index='pairing', columns='session_period', aggfunc='mean'
+                                ).round(0)
+                                st.dataframe(
+                                    pv_eff.style
+                                        .background_gradient(cmap='RdYlGn', axis=None, vmin=70, vmax=105)
+                                        .format('{:.0f}%', na_rep='—'),
+                                    use_container_width=True
+                                )
+
+                            with sv2:
+                                pv_pph = pd.pivot_table(
+                                    shift_df, values='parts_per_hr',
+                                    index='pairing', columns='session_period', aggfunc='mean'
+                                ).round(0)
+                                st.dataframe(
+                                    pv_pph.style
+                                        .background_gradient(cmap='RdYlGn', axis=None)
+                                        .format('{:.0f}', na_rep='—'),
+                                    use_container_width=True
+                                )
+                    else:
+                        st.caption("Upload TMD log to enable shift breakdown.")
 
 
 if __name__ == "__main__":
