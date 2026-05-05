@@ -1876,54 +1876,95 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
             )
             rec_rows = []
             for tid in sel_tool_ids:
-                tool_data = fit_df[fit_df['tool_id'] == tid]
+                tool_data = fit_df[fit_df['tool_id'] == tid].sort_values(
+                    'cap_efficiency_pct', ascending=False
+                ).reset_index(drop=True)
                 if tool_data.empty:
                     continue
-                best_row  = tool_data.loc[tool_data['cap_efficiency_pct'].idxmax()]
-                worst_row = tool_data.loc[tool_data['cap_efficiency_pct'].idxmin()]
+                best_row   = tool_data.iloc[0]
+                worst_row  = tool_data.iloc[-1]
+                second_row = tool_data.iloc[1] if len(tool_data) > 1 else None
                 pph = (best_row['total_parts'] / best_row['production_hrs']
                        if best_row['production_hrs'] > 0 else 0)
 
-                # Best historical period for this tool-machine pair
-                best_period = None
-                if 'session_period' in df_processed_global.columns:
-                    sub = df_processed_global[
+                # Best actual run: find the session with highest cap efficiency
+                # for this tool on its best machine from df_processed_global
+                best_run_start = best_run_end = best_run_cap_eff = '—'
+                if not df_processed_global.empty and 'machine_id' in df_processed_global.columns:
+                    pair_shots = df_processed_global[
                         (df_processed_global['tool_id'] == tid) &
-                        (df_processed_global['machine_id'] == best_row['machine_id']) &
-                        (df_processed_global['stop_flag'] == 0)
+                        (df_processed_global['machine_id'] == best_row['machine_id'])
                     ]
-                    if not sub.empty:
-                        period_eff = sub.groupby('session_period')['actual_ct'].mean()
-                        approved = float(sub['approved_ct'].iloc[0])
-                        # Best period = closest to approved CT on average
-                        best_period = (period_eff - approved).abs().idxmin()
+                    if not pair_shots.empty and 'run_id' in pair_shots.columns:
+                        best_run_eff = -1
+                        for run_id, rg in pair_shots.groupby('run_id'):
+                            prod = rg[rg['stop_flag'] == 0]
+                            dur = (rg['shot_time'].max() - rg['shot_time'].min()).total_seconds()
+                            if dur <= 0: continue
+                            rct = float(rg['approved_ct_for_run'].iloc[0]) if 'approved_ct_for_run' in rg.columns else float(rg['approved_ct'].iloc[0])
+                            rcav = float(rg['working_cavities'].max()) if 'working_cavities' in rg.columns else 1.0
+                            opt = (dur / rct) * rcav if rct > 0 else 0
+                            act = float(prod['working_cavities'].sum()) if 'working_cavities' in prod.columns else float(len(prod))
+                            eff = act / opt * 100 if opt > 0 else 0
+                            if eff > best_run_eff:
+                                best_run_eff   = eff
+                                best_run_start = rg['shot_time'].min().strftime('%d %b %Y %H:%M')
+                                best_run_end   = rg['shot_time'].max().strftime('%d %b %Y %H:%M')
+                                best_run_cap_eff = eff
 
                 rec_rows.append({
-                    'tool_id':          tid,
-                    'best_machine':     best_row['machine_id'],
-                    'best_cap_eff':     best_row['cap_efficiency_pct'],
-                    'best_stability':   best_row['stability_pct'],
+                    'tool_id':           tid,
+                    'best_machine':      best_row['machine_id'],
+                    'best_cap_eff':      best_row['cap_efficiency_pct'],
+                    'best_stability':    best_row['stability_pct'],
                     'best_parts_per_hr': round(pph, 0),
-                    'best_fit_score':   best_row['fit_score'],
-                    'best_period':      best_period or '—',
-                    'worst_machine':    worst_row['machine_id'],
-                    'worst_cap_eff':    worst_row['cap_efficiency_pct'],
-                    'machines_tested':  len(tool_data),
-                    'vs_worst_pp':      round(best_row['cap_efficiency_pct'] - worst_row['cap_efficiency_pct'], 0),
+                    'best_fit_score':    best_row['fit_score'],
+                    'best_run_start':    best_run_start,
+                    'best_run_end':      best_run_end,
+                    'best_run_cap_eff':  best_run_cap_eff if isinstance(best_run_cap_eff, float) else 0,
+                    'second_machine':    second_row['machine_id'] if second_row is not None else None,
+                    'second_cap_eff':    second_row['cap_efficiency_pct'] if second_row is not None else 0,
+                    'vs_second_pp':      round((second_row['cap_efficiency_pct'] - best_row['cap_efficiency_pct']), 0) if second_row is not None else 0,
+                    'worst_machine':     worst_row['machine_id'],
+                    'worst_cap_eff':     worst_row['cap_efficiency_pct'],
+                    'machines_tested':   len(tool_data),
+                    'vs_worst_pp':       round(best_row['cap_efficiency_pct'] - worst_row['cap_efficiency_pct'], 0),
                 })
 
             if rec_rows:
                 card_cols_top = st.columns(min(len(rec_rows), 3))
                 for i, r in enumerate(rec_rows):
                     with card_cols_top[i % min(len(rec_rows), 3)]:
-                        has_compare = r['machines_tested'] > 1
-                        avoid_html = (
-                            f'<span style="color:{C["red"]};font-size:0.82em">'
-                            f'⚠️ Avoid: {r["worst_machine"]} '
-                            f'({r["worst_cap_eff"]:.0f}% — {r["vs_worst_pp"]:+.0f} pp)</span>'
-                            if has_compare else
-                            '<span style="font-size:0.8em;color:#aaa">Only tested on one machine</span>'
-                        )
+                        has_secondary = r['machines_tested'] > 1
+                        has_tertiary  = r['machines_tested'] > 2
+
+                        secondary_html = ''
+                        if has_secondary and r.get('second_machine'):
+                            secondary_html = (
+                                f'<br><span style="font-size:0.83em;color:{C["blue"]}">'
+                                f'🥈 Next best: <b>{r["second_machine"]}</b> — '
+                                f'{r["second_cap_eff"]:.0f}% cap eff '
+                                f'({r["vs_second_pp"]:+.0f} pp vs best)</span>'
+                            )
+
+                        avoid_html = ''
+                        if has_secondary and r.get('worst_machine') != r.get('best_machine'):
+                            avoid_html = (
+                                f'<span style="color:{C["red"]};font-size:0.82em">'
+                                f'⚠️ Avoid: <b>{r["worst_machine"]}</b> '
+                                f'({r["worst_cap_eff"]:.0f}% — {r["vs_worst_pp"]:+.0f} pp vs best)</span>'
+                            )
+                        elif not has_secondary:
+                            avoid_html = '<span style="font-size:0.8em;color:#aaa">Only tested on one machine</span>'
+
+                        best_run_html = ''
+                        if r.get('best_run_start') and r['best_run_start'] != '—':
+                            best_run_html = (
+                                f'Best run: <b>{r["best_run_start"]}</b>'
+                                f'{" → " + r["best_run_end"] if r.get("best_run_end") and r["best_run_end"] != r["best_run_start"] else ""}'
+                                f' ({r["best_run_cap_eff"]:.0f}% cap eff)<br>'
+                            )
+
                         st.markdown(f"""
                         <div style="background:#1a1a2e;border:1px solid {C['green']};
                                     border-radius:8px;padding:14px;margin-bottom:8px">
@@ -1937,8 +1978,10 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                                 Stability: {r['best_stability']:.0f}%<br>
                                 Parts/hr: {r['best_parts_per_hr']:.0f} &nbsp;|&nbsp;
                                 Fit Score: {r['best_fit_score']:.0f}/100<br>
-                                Best Period: <b>{r['best_period']}</b>
-                            </span><br><br>
+                                {best_run_html}
+                            </span>
+                            {secondary_html}
+                            <br><br>
                             {avoid_html}
                         </div>""", unsafe_allow_html=True)
 
@@ -1980,27 +2023,36 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                 use_container_width=True
             )
 
-            # ── % Delta vs average table ──────────────────────────────────────
-            st.markdown("#### vs Average (% difference from group mean)")
-            st.caption("Positive = above average. For MTTR, Slow Loss, Stops — negative is better.")
-            d_disp = delta[disp_cols_pc].rename(columns=labels)
-            d_disp.index.name = 'Machine'
+            # ── vs Best Machine table ─────────────────────────────────────────
+            st.markdown("#### vs Best Machine")
+            st.caption(
+                "How each machine compares to this tool's best machine. "
+                "Green = outperforms best on that metric. "
+                "The best machine row shows 0 pp by definition. "
+                "For MTTR and Slow Loss — negative is better."
+            )
+            # Compute vs-best delta: each machine minus the best machine's value
+            kpi_cols = [c for c in labels if c in alltime.columns]
+            best_machine_vals = alltime[kpi_cols].loc[alltime['cap_efficiency_pct'].idxmax()] if 'cap_efficiency_pct' in alltime.columns else alltime[kpi_cols].iloc[0]
+            vs_best = alltime[kpi_cols].subtract(best_machine_vals).round(1)
+            vb_disp = vs_best.rename(columns=labels)
+            vb_disp.index.name = 'Machine'
 
-            def _style_delta(row):
+            def _style_vb(row):
                 styles = []
-                for col, orig in zip(d_disp.columns, disp_cols_pc):
+                for col, orig in zip(vb_disp.columns, kpi_cols):
                     v = row[col]
                     if orig in hb:
-                        styles.append(f'color:{C["green"]};font-weight:bold' if v > 2 else
-                                      (f'color:{C["red"]}' if v < -2 else ''))
+                        styles.append(f'color:{C["green"]}' if v > 1 else
+                                      (f'color:{C["red"]}' if v < -1 else ''))
                     else:
-                        styles.append(f'color:{C["green"]};font-weight:bold' if v < -2 else
-                                      (f'color:{C["red"]}' if v > 2 else ''))
+                        styles.append(f'color:{C["green"]}' if v < -1 else
+                                      (f'color:{C["red"]}' if v > 1 else ''))
                 return styles
 
-            fmt_dict = {c: '{:+.1f}%' for c in d_disp.columns}
+            fmt_vb = {c: '{:+.1f}' for c in vb_disp.columns}
             st.dataframe(
-                d_disp.style.apply(_style_delta, axis=1).format(fmt_dict, na_rep='—'),
+                vb_disp.style.apply(_style_vb, axis=1).format(fmt_vb, na_rep='—'),
                 use_container_width=True
             )
 
