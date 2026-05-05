@@ -2438,15 +2438,52 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                     df_processed_global['tool_id'] == dd_tool
                 ].copy()
                 if not tool_sessions.empty and 'session_period' in tool_sessions.columns:
-                    period_agg = tool_sessions[tool_sessions['stop_flag']==0].groupby(
-                        ['machine_id','session_period']
-                    ).agg(avg_ct=('actual_ct','mean')).round(1).reset_index()
-                    if not period_agg.empty:
-                        pv_period = pd.pivot_table(
-                            period_agg, values='avg_ct',
-                            index='machine_id', columns='session_period', aggfunc='mean'
-                        ).round(1)
-                        st.dataframe(pv_period, use_container_width=True)
+                    prod_shots = tool_sessions[tool_sessions['stop_flag'] == 0]
+
+                    # Cap Efficiency per machine per shift
+                    shift_rows = []
+                    for (mid, period), grp in tool_sessions.groupby(['machine_id','session_period']):
+                        prod = grp[grp['stop_flag'] == 0]
+                        dur = (grp['shot_time'].max() - grp['shot_time'].min()).total_seconds()
+                        rct = float(grp['approved_ct_for_run'].iloc[0]) if 'approved_ct_for_run' in grp.columns else float(grp['approved_ct'].iloc[0])
+                        rcav = float(grp['working_cavities'].max()) if 'working_cavities' in grp.columns else 1.0
+                        opt = (dur / rct) * rcav if rct > 0 and dur > 0 else 0
+                        act = float(prod['working_cavities'].sum()) if 'working_cavities' in prod.columns else float(len(prod))
+                        cap_eff = round(act / opt * 100, 1) if opt > 0 else None
+                        pph = round(act / (dur / 3600), 1) if dur > 0 else None
+                        shift_rows.append({
+                            'machine_id': mid, 'session_period': period,
+                            'cap_eff': cap_eff, 'parts_per_hr': pph,
+                            'shots': len(grp),
+                        })
+
+                    if shift_rows:
+                        shift_df = pd.DataFrame(shift_rows)
+                        sv1, sv2 = st.tabs(["Cap Efficiency %", "Parts per Hour"])
+
+                        with sv1:
+                            pv_eff = pd.pivot_table(
+                                shift_df, values='cap_eff',
+                                index='machine_id', columns='session_period', aggfunc='mean'
+                            ).round(1)
+                            st.dataframe(
+                                pv_eff.style
+                                    .background_gradient(cmap='RdYlGn', axis=None, vmin=70, vmax=105)
+                                    .format('{:.0f}%', na_rep='—'),
+                                use_container_width=True
+                            )
+
+                        with sv2:
+                            pv_pph = pd.pivot_table(
+                                shift_df, values='parts_per_hr',
+                                index='machine_id', columns='session_period', aggfunc='mean'
+                            ).round(0)
+                            st.dataframe(
+                                pv_pph.style
+                                    .background_gradient(cmap='RdYlGn', axis=None)
+                                    .format('{:.0f}', na_rep='—'),
+                                use_container_width=True
+                            )
 
             # ── Copy group bar compare ────────────────────────────────────────
             if grp_name and siblings:
