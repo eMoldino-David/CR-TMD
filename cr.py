@@ -1607,6 +1607,68 @@ def main():
     #     render_forecast_tab(df_tool_scope, config, df_logistics,
     #                         working_days_per_week, working_hours_per_day)
 
+@st.dialog("📊 Capacity Risk Analysis — Optimal Pairing", width="large")
+def _cr_pairing_dialog():
+    """Modal popup: runs CR analysis on a specific tool-machine pairing."""
+    tool_id    = st.session_state.get('cr_dialog_tool')
+    machine_id = st.session_state.get('cr_dialog_machine')
+    df_proc    = st.session_state.get('cr_dialog_df_proc', pd.DataFrame())
+    config     = st.session_state.get('cr_dialog_config', {})
+
+    if not tool_id or df_proc.empty:
+        st.warning("No data available for this pairing.")
+        return
+
+    st.markdown(f"**Tool:** {tool_id} &nbsp;|&nbsp; **Machine:** {machine_id}")
+    st.caption("Results based on all historical sessions of this tool on this machine.")
+
+    # Filter to this specific tool-machine pair
+    mask = (df_proc['tool_id'].astype(str) == str(tool_id))
+    if machine_id and 'machine_id' in df_proc.columns:
+        mask &= (df_proc['machine_id'].astype(str) == str(machine_id))
+    pair_df = df_proc[mask].copy()
+
+    if pair_df.empty or len(pair_df) < 5:
+        st.warning("Not enough shot data for this tool-machine pair to run analysis.")
+        return
+
+    with st.spinner("Running capacity risk analysis…"):
+        try:
+            calc = cr_CG_utils.CapacityRiskCalculator(pair_df, **config)
+            res  = calc.results
+        except Exception as e:
+            st.error(f"Analysis failed: {e}")
+            return
+
+    # ── KPI strip ────────────────────────────────────────────────────────────
+    cap_eff = res.get('capacity_efficiency', 0) * 100
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Cap Efficiency",
+              f"{cap_eff:.0f}%",
+              delta=f"{cap_eff-100:.0f} pp vs optimal")
+    k2.metric("Stability",
+              f"{res.get('stability_index', 0):.0f}%")
+    k3.metric("MTBF",
+              f"{res.get('mtbf_min', 0):.0f} min")
+    k4.metric("MTTR",
+              f"{res.get('mttr_min', 0):.1f} min")
+
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Optimal Output",  f"{res.get('optimal_output_parts', 0):,.0f} parts")
+    s2.metric("Actual Output",   f"{res.get('actual_output_parts',  0):,.0f} parts")
+    s3.metric("Downtime Loss",   f"{res.get('capacity_loss_downtime_parts', 0):,.0f} parts")
+    s4.metric("Slow Cycle Loss", f"{res.get('capacity_loss_slow_parts',     0):,.0f} parts")
+
+    st.markdown("---")
+
+    # ── Waterfall ─────────────────────────────────────────────────────────────
+    try:
+        fig_wf = cr_CG_utils.plot_waterfall(res, benchmark_mode="Optimal")
+        st.plotly_chart(fig_wf, use_container_width=True, key="dialog_waterfall")
+    except Exception:
+        st.info("Waterfall chart unavailable for this dataset.")
+
+
 def render_machine_fit_tab(df_processed_global, config, machine_master=None, tools_ref=None, key_suffix=''):
     """Renders the Machine Fit Analysis tab — 3 sub-tabs: Overview, Rankings, Deep Dive."""
     st.header("🔧 Machine Fit Analysis")
@@ -1929,8 +1991,96 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
             )
             st.plotly_chart(fig_rank, use_container_width=True, key=f"pc_rank{key_suffix}")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 3 — OPTIMAL PAIRINGS
+            # ── Best machine per tool (copy group only) ───────────────────────
+            if len(sel_tool_ids) > 1:
+                st.markdown("---")
+                st.markdown("#### Best Machine Recommendation — Per Tool in This Part Group")
+                st.caption(
+                    "Each copy tool may perform better on a different machine. "
+                    "This shows the individually recommended machine for each tool "
+                    "based on its own historical cap efficiency."
+                )
+
+                rec_rows = []
+                for tid in sel_tool_ids:
+                    tool_data = fit_df[fit_df['tool_id'] == tid]
+                    if tool_data.empty:
+                        continue
+                    best_row  = tool_data.loc[tool_data['cap_efficiency_pct'].idxmax()]
+                    worst_row = tool_data.loc[tool_data['cap_efficiency_pct'].idxmin()]
+                    pph = (best_row['total_parts'] / best_row['production_hrs']
+                           if best_row['production_hrs'] > 0 else 0)
+                    rec_rows.append({
+                        'tool_id':   tid,
+                        'best_machine':     best_row['machine_id'],
+                        'best_cap_eff':     best_row['cap_efficiency_pct'],
+                        'best_stability':   best_row['stability_pct'],
+                        'best_parts_per_hr': round(pph, 0),
+                        'best_fit_score':   best_row['fit_score'],
+                        'worst_machine':    worst_row['machine_id'],
+                        'worst_cap_eff':    worst_row['cap_efficiency_pct'],
+                        'machines_tested':  len(tool_data),
+                        'vs_worst_pp':      round(best_row['cap_efficiency_pct'] - worst_row['cap_efficiency_pct'], 0),
+                    })
+
+                if rec_rows:
+                    # Recommendation cards — one per tool
+                    card_cols_cg = st.columns(min(len(rec_rows), 3))
+                    for i, r in enumerate(rec_rows):
+                        with card_cols_cg[i % min(len(rec_rows), 3)]:
+                            st.markdown(f"""
+                            <div style="background:#1a1a2e;border:1px solid {C['green']};
+                                        border-radius:8px;padding:14px;margin-bottom:8px">
+                                <b style="color:{C['green']};font-size:1.0em">
+                                    {r['tool_id']}
+                                </b><br>
+                                <span style="color:#aaa;font-size:0.8em">
+                                    {int(r['machines_tested'])} machine{'s' if r['machines_tested']!=1 else ''} tested
+                                </span><br><br>
+                                <b>✅ Best: {r['best_machine']}</b><br>
+                                <span style="font-size:0.85em">
+                                    Cap Eff: <b>{r['best_cap_eff']:.0f}%</b> &nbsp;|&nbsp;
+                                    Stability: {r['best_stability']:.0f}%<br>
+                                    Parts/hr: {r['best_parts_per_hr']:.0f} &nbsp;|&nbsp;
+                                    Fit Score: {r['best_fit_score']:.0f}/100
+                                </span><br><br>
+                                <span style="color:{C['red']};font-size:0.85em">
+                                    ⚠️ Avoid: {r['worst_machine']}
+                                    ({r['worst_cap_eff']:.0f}% — {r['vs_worst_pp']:+.0f} pp vs best)
+                                </span>
+                            </div>""", unsafe_allow_html=True)
+
+                    # Summary comparison table
+                    rec_df_disp = pd.DataFrame(rec_rows)[[
+                        'tool_id','best_machine','best_cap_eff','best_stability',
+                        'best_parts_per_hr','best_fit_score','worst_machine',
+                        'worst_cap_eff','vs_worst_pp','machines_tested'
+                    ]].rename(columns={
+                        'tool_id':'Tool','best_machine':'Best Machine',
+                        'best_cap_eff':'Best Cap Eff %','best_stability':'Best Stability %',
+                        'best_parts_per_hr':'Best Parts/hr','best_fit_score':'Fit Score',
+                        'worst_machine':'Avoid Machine','worst_cap_eff':'Worst Cap Eff %',
+                        'vs_worst_pp':'Spread (pp)','machines_tested':'Machines Tested',
+                    })
+
+                    def _style_cg_rec(row):
+                        styles = [''] * len(row)
+                        for i, col in enumerate(rec_df_disp.columns):
+                            if col == 'Best Cap Eff %':
+                                styles[i] = f'color:{C["green"]};font-weight:bold'
+                            elif col == 'Worst Cap Eff %':
+                                styles[i] = f'color:{C["red"]}'
+                            elif col == 'Spread (pp)':
+                                styles[i] = f'color:{C["orange"]}' if row[col] > 5 else ''
+                        return styles
+
+                    st.dataframe(
+                        rec_df_disp.style.apply(_style_cg_rec, axis=1)
+                        .format({'Best Cap Eff %':'{:.0f}%','Best Stability %':'{:.0f}%',
+                                 'Worst Cap Eff %':'{:.0f}%','Best Parts/hr':'{:.0f}',
+                                 'Fit Score':'{:.0f}','Spread (pp)':'{:+.0f} pp'}, na_rep='—'),
+                        use_container_width=True, hide_index=True
+                    )
     # ══════════════════════════════════════════════════════════════════════════
     with sub_pairings:
         st.subheader("Optimal Machine-Tool Pairings")
@@ -1945,33 +2095,36 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
             st.warning("Not enough data to generate pairings.")
         else:
             r1, r2 = st.columns(2)
-            r1.metric("Machines with Data",   f"{len(recs_df)}")
-            gain_total = recs_df['parts_gain_best_vs_worst'].sum()
-            r2.metric("Total Gain Potential",
-                      f"+{gain_total:,.0f} parts/hr" if gain_total >= 0 else f"{gain_total:,.0f} parts/hr",
-                      help="Sum across all machines: extra parts/hr if each ran its best tool vs worst")
+            r1.metric("Machines with Data", f"{len(recs_df)}")
+            r2.metric("Total Cap Eff Gain Potential",
+                      f"+{recs_df['cap_eff_gain'].sum():.0f} pp",
+                      help="Sum of cap efficiency gain across all machines if each ran its best tool instead of worst")
 
             st.markdown("---")
             st.markdown("#### Recommended Pairings")
-            st.caption("Expand each machine to see detailed metrics of its optimal run period.")
+            st.caption(
+                "Ranked by cap efficiency spread. "
+                "**Cap eff gain** = percentage point improvement switching from worst to best tool on that machine. "
+                "Parts/hr shown as context — differs between tools due to cycle time and cavity count."
+            )
 
             for _, row in recs_df.iterrows():
-                gain = row['parts_gain_best_vs_worst']
-                spread_color = C['orange'] if row['cap_eff_spread'] > 5 else C['blue']
-                gain_str = f"+{gain:.0f}" if gain >= 0 else f"{gain:.0f}"
+                gain = row['cap_eff_gain']
+                best_eff = row['best_cap_eff']
+                # Colour indicator based on best tool's cap efficiency
+                indicator = "🟢" if best_eff >= 90 else ("🟡" if best_eff >= 75 else "🔴")
 
                 with st.expander(
-                    f"**{row['machine_id']}** — Best match: {row['best_tool']} "
-                    f"({row['best_supplier']}) | {gain_str} parts/hr vs worst | "
-                    f"{row['cap_eff_spread']:.0f} pp spread across {int(row['tools_compared'])} tools"
+                    f"{indicator} **{row['machine_id']}** — Best: {row['best_tool']} "
+                    f"({row['best_supplier']}) | +{gain:.0f} pp cap eff gain | "
+                    f"{int(row['tools_compared'])} tools compared"
                 ):
                     ec1, ec2 = st.columns(2)
                     with ec1:
-                        st.markdown(f"**Best match: {row['best_tool']}** ({row['best_supplier']})")
+                        st.markdown(f"**✅ Best match: {row['best_tool']}** ({row['best_supplier']})")
                         st.markdown(f"Cap Efficiency: **{row['best_cap_eff']:.0f}%**")
-                        st.markdown(f"Parts/hr: **{row['best_parts_per_hr']:.0f}**")
+                        st.markdown(f"Parts/hr: {row['best_parts_per_hr']:.0f} *(context — depends on CT & cavities)*")
 
-                        # Find the best session for this tool-machine pair
                         best_sessions = fit_df[
                             (fit_df['tool_id'] == row['best_tool']) &
                             (fit_df['machine_id'] == row['machine_id'])
@@ -1988,34 +2141,36 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                                 f"Prod Hrs: {bs['production_hrs']:.0f} &nbsp;|&nbsp; "
                                 f"Parts: {bs['total_parts']:.0f}"
                             )
-                            # Capacity Risk Analysis button
                             btn_key = f"cr_analysis_{row['machine_id']}_{row['best_tool']}"
-                            if st.button(f"📊 Run CR Analysis on this pairing", key=btn_key):
-                                st.session_state['cr_analysis_tool']    = row['best_tool']
-                                st.session_state['cr_analysis_machine'] = row['machine_id']
-                                st.success(
-                                    f"Go to the main Capacity tab and select **{row['best_tool']}** "
-                                    f"to see the full capacity risk breakdown for this optimal pairing. "
-                                    f"(Machine filter: {row['machine_id']})"
-                                )
+                            if st.button("📊 Run CR Analysis on this pairing", key=btn_key):
+                                st.session_state['cr_dialog_tool']    = row['best_tool']
+                                st.session_state['cr_dialog_machine'] = row['machine_id']
+                                st.session_state['cr_dialog_df_proc'] = df_processed_global
+                                st.session_state['cr_dialog_config']  = config
+                                _cr_pairing_dialog()
 
                     with ec2:
-                        st.markdown(f"**Worst match: {row['worst_tool']}** ({row['worst_supplier']})")
+                        st.markdown(f"**⚠️ Worst match: {row['worst_tool']}** ({row['worst_supplier']})")
                         st.markdown(f"Cap Efficiency: **{row['worst_cap_eff']:.0f}%**")
-                        st.markdown(f"Spread vs best: **{row['cap_eff_spread']:.0f} pp**")
-                        st.markdown(f"Gain if replaced: **{gain_str} parts/hr**")
+                        st.markdown(f"Parts/hr: {row['worst_parts_per_hr']:.0f} *(context)*")
+                        st.markdown(f"Cap eff gap vs best: **+{gain:.0f} pp**")
+                        st.caption(
+                            "Note: parts/hr difference between tools reflects their cycle time "
+                            "and cavity count — not machine performance. Cap efficiency is the "
+                            "comparable metric across tools."
+                        )
 
             st.markdown("#### Full Table")
             best_display = recs_df[[
                 'machine_id','best_tool','best_supplier','best_cap_eff','best_parts_per_hr',
-                'worst_tool','worst_supplier','worst_cap_eff',
-                'tools_compared','cap_eff_spread','parts_gain_best_vs_worst',
+                'worst_tool','worst_supplier','worst_cap_eff','worst_parts_per_hr',
+                'tools_compared','cap_eff_gain',
             ]].rename(columns={
                 'machine_id':'Machine','best_tool':'Best Tool','best_supplier':'Best Supplier',
                 'best_cap_eff':'Best Cap Eff %','best_parts_per_hr':'Best Parts/hr',
                 'worst_tool':'Worst Tool','worst_supplier':'Worst Supplier',
-                'worst_cap_eff':'Worst Cap Eff %','tools_compared':'Tools Compared',
-                'cap_eff_spread':'Spread (pp)','parts_gain_best_vs_worst':'Gain (parts/hr)',
+                'worst_cap_eff':'Worst Cap Eff %','worst_parts_per_hr':'Worst Parts/hr',
+                'tools_compared':'Tools Compared','cap_eff_gain':'Cap Eff Gain (pp)',
             })
 
             def _style_recs(row):
@@ -2023,15 +2178,15 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                 for i, col in enumerate(best_display.columns):
                     if col == 'Best Cap Eff %':    styles[i] = f'color:{C["green"]};font-weight:bold'
                     elif col == 'Worst Cap Eff %': styles[i] = f'color:{C["red"]}'
-                    elif col in ('Spread (pp)', 'Gain (parts/hr)'):
-                        styles[i] = f'color:{C["orange"]}' if abs(row[col]) > 5 else ''
+                    elif col == 'Cap Eff Gain (pp)':
+                        styles[i] = f'color:{C["orange"]}' if row[col] > 5 else ''
                 return styles
 
             st.dataframe(
                 best_display.style.apply(_style_recs, axis=1)
                 .format({'Best Cap Eff %':'{:.0f}%','Worst Cap Eff %':'{:.0f}%',
-                         'Best Parts/hr':'{:.0f}','Spread (pp)':'{:.0f}',
-                         'Gain (parts/hr)':'{:+.0f}'}, na_rep='—'),
+                         'Best Parts/hr':'{:.0f}','Worst Parts/hr':'{:.0f}',
+                         'Cap Eff Gain (pp)':'{:+.0f} pp'}, na_rep='—'),
                 use_container_width=True, hide_index=True
             )
 
