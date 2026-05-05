@@ -2330,10 +2330,10 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
         all_tools_dd  = sorted(fit_df['tool_id'].unique())
 
         if all_groups_dd:
-            dd_part = st.selectbox("Select Part", all_groups_dd, key=f"dd_part{key_suffix}")
+            dd_part = st.selectbox("Select Part", all_groups_dd, key=f"dd_part_grp{key_suffix}")
             dd_tool_ids = [t for t in all_tools_dd if copy_map.get(t) == dd_part]
         else:
-            dd_part = st.selectbox("Select Tool", all_tools_dd, key=f"dd_part{key_suffix}")
+            dd_part = st.selectbox("Select Tool", all_tools_dd, key=f"dd_part_tool{key_suffix}")
             dd_tool_ids = [dd_part]
 
         # ── Date range slider ─────────────────────────────────────────────────
