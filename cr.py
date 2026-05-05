@@ -1609,51 +1609,135 @@ def main():
 
 def _cr_pairing_dialog_body():
     """Shared body for CR analysis popup."""
-    tool_id    = st.session_state.get('cr_dialog_tool')
-    machine_id = st.session_state.get('cr_dialog_machine')
-    df_proc    = st.session_state.get('cr_dialog_df_proc', pd.DataFrame())
-    config     = st.session_state.get('cr_dialog_config', {})
+    tool_id      = st.session_state.get('cr_dialog_tool')
+    machine_id   = st.session_state.get('cr_dialog_machine')
+    df_proc      = st.session_state.get('cr_dialog_df_proc', pd.DataFrame())
+    config       = st.session_state.get('cr_dialog_config', {})
+    date_from    = st.session_state.get('cr_dialog_date_from')
+    date_to      = st.session_state.get('cr_dialog_date_to')
+    shift_filter = st.session_state.get('cr_dialog_shift_filter')
 
     if not tool_id or df_proc.empty:
         st.warning("No data available for this pairing.")
         return
 
-    st.markdown(f"**Tool:** {tool_id} &nbsp;|&nbsp; **Machine:** {machine_id or 'All machines'}")
-    st.caption("Results based on all historical sessions of this tool on this machine.")
-
+    # ── Base filter: tool + machine ───────────────────────────────────────────
     mask = df_proc['tool_id'].astype(str) == str(tool_id)
     if machine_id and 'machine_id' in df_proc.columns:
         mask &= df_proc['machine_id'].astype(str) == str(machine_id)
-    pair_df = df_proc[mask].copy()
+    base_df = df_proc[mask].copy()
 
-    if pair_df.empty or len(pair_df) < 5:
-        st.warning("Not enough shot data for this tool-machine pair to run analysis.")
+    if base_df.empty:
+        st.warning("No shot data found for this tool-machine pair.")
         return
 
-    with st.spinner("Running capacity risk analysis…"):
-        try:
-            calc = cr_CG_utils.CapacityRiskCalculator(pair_df, **config)
-            res  = calc.results
-        except Exception as e:
-            st.error(f"Analysis failed: {e}")
-            return
+    # ── Period filter for comparison ──────────────────────────────────────────
+    period_df = base_df.copy()
+    period_label = "Full History"
 
-    cap_eff = res.get('capacity_efficiency', 0) * 100
+    if date_from and date_to:
+        period_df = base_df[
+            (base_df['shot_time'] >= pd.Timestamp(date_from)) &
+            (base_df['shot_time'] <= pd.Timestamp(date_to))
+        ]
+        period_label = f"{pd.Timestamp(date_from).strftime('%d %b %Y')} → {pd.Timestamp(date_to).strftime('%d %b %Y')}"
+
+    if shift_filter and 'session_period' in period_df.columns:
+        period_df = period_df[period_df['session_period'] == shift_filter]
+        period_label += f" · {shift_filter} only"
+
+    if period_df.empty or len(period_df) < 5:
+        st.warning(f"Not enough shots in the selected period ({period_label}) to run analysis.")
+        return
+
+    st.markdown(f"**Tool:** {tool_id} &nbsp;|&nbsp; **Machine:** {machine_id or 'All'}")
+    st.caption(f"Analysis period: **{period_label}**")
+
+    def _run_calc(df):
+        if len(df) < 5:
+            return None
+        try:
+            calc = cr_CG_utils.CapacityRiskCalculator(df, **config)
+            return calc.results
+        except Exception:
+            return None
+
+    with st.spinner("Running analysis…"):
+        res_period = _run_calc(period_df)
+        res_base   = _run_calc(base_df) if (date_from or shift_filter) else None
+
+    if not res_period:
+        st.error("Analysis could not be completed for this period.")
+        return
+
+    cap_eff = res_period.get('capacity_efficiency', 0) * 100
+
+    # ── KPI strip ─────────────────────────────────────────────────────────────
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Cap Efficiency", f"{cap_eff:.0f}%", delta=f"{cap_eff-100:.0f} pp vs optimal")
-    k2.metric("Stability",      f"{res.get('stability_index', 0):.0f}%")
-    k3.metric("MTBF",           f"{res.get('mtbf_min', 0):.0f} min")
-    k4.metric("MTTR",           f"{res.get('mttr_min', 0):.1f} min")
+    k1.metric("Cap Efficiency", f"{cap_eff:.0f}%",
+              delta=f"{cap_eff - 100:.0f} pp vs optimal")
+    k2.metric("Stability",      f"{res_period.get('stability_index', 0):.0f}%")
+    k3.metric("MTBF",           f"{res_period.get('mtbf_min', 0):.0f} min")
+    k4.metric("MTTR",           f"{res_period.get('mttr_min', 0):.1f} min")
 
     s1, s2, s3, s4 = st.columns(4)
-    s1.metric("Optimal Output",  f"{res.get('optimal_output_parts', 0):,.0f} parts")
-    s2.metric("Actual Output",   f"{res.get('actual_output_parts',  0):,.0f} parts")
-    s3.metric("Downtime Loss",   f"{res.get('capacity_loss_downtime_parts', 0):,.0f} parts")
-    s4.metric("Slow Cycle Loss", f"{res.get('capacity_loss_slow_parts',     0):,.0f} parts")
+    s1.metric("Optimal Output",  f"{res_period.get('optimal_output_parts', 0):,.0f} parts")
+    s2.metric("Actual Output",   f"{res_period.get('actual_output_parts',  0):,.0f} parts")
+    s3.metric("Downtime Loss",   f"{res_period.get('capacity_loss_downtime_parts', 0):,.0f} parts")
+    s4.metric("Slow Cycle Loss", f"{res_period.get('capacity_loss_slow_parts', 0):,.0f} parts")
+
+    # ── Comparison table vs full history ──────────────────────────────────────
+    if res_base:
+        st.markdown("---")
+        st.markdown("**Period vs Full History**")
+        KPI_MAP = [
+            ('capacity_efficiency',          'Cap Efficiency %',  True,  lambda v: f"{v*100:.0f}%"),
+            ('stability_index',              'Stability %',       True,  lambda v: f"{v:.0f}%"),
+            ('mtbf_min',                     'MTBF (min)',        True,  lambda v: f"{v:.0f}"),
+            ('mttr_min',                     'MTTR (min)',        False, lambda v: f"{v:.1f}"),
+            ('capacity_loss_downtime_parts', 'Downtime Loss',     False, lambda v: f"{v:,.0f}"),
+            ('capacity_loss_slow_parts',     'Slow Cycle Loss',   False, lambda v: f"{v:,.0f}"),
+        ]
+        cmp_rows = []
+        for key, label, higher_better, fmt in KPI_MAP:
+            p_val = res_period.get(key, 0)
+            b_val = res_base.get(key, 0)
+            if key == 'capacity_efficiency':
+                delta = (p_val - b_val) * 100
+                p_str = fmt(p_val); b_str = fmt(b_val)
+            else:
+                delta = p_val - b_val
+                p_str = fmt(p_val); b_str = fmt(b_val)
+            good = (delta > 0 and higher_better) or (delta < 0 and not higher_better)
+            cmp_rows.append({
+                'KPI': label,
+                period_label: p_str,
+                'Full History': b_str,
+                'Δ': f"{delta:+.1f}",
+                '_good': good,
+                '_delta': delta,
+            })
+        cmp_df = pd.DataFrame(cmp_rows)
+
+        def _style_cmp(row):
+            styles = ['', '', '', '']
+            d = row['_delta']; g = row['_good']
+            if abs(d) > 0.5:
+                styles[3] = 'color:#4CAF50;font-weight:bold' if g else 'color:#FF5252'
+            return styles
+
+        display_cmp = cmp_df[['KPI', period_label, 'Full History', 'Δ']]
+        st.dataframe(
+            display_cmp.style.apply(
+                lambda row: _style_cmp(cmp_df.loc[row.name]),
+                axis=1
+            ).format(na_rep='—'),
+            use_container_width=True, hide_index=True
+        )
 
     st.markdown("---")
     try:
-        fig_wf = cr_CG_utils.plot_waterfall(res, benchmark_mode="Optimal")
+        fig_wf = cr_CG_utils.plot_waterfall(res_period, benchmark_mode="Optimal")
         st.plotly_chart(fig_wf, use_container_width=True, key="dialog_waterfall")
     except Exception:
         st.info("Waterfall chart unavailable for this dataset.")
@@ -2412,13 +2496,18 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
                         btn_label = (
                             f"📊 Analyse {ins_tool}"
                             + (f" on {ins_machine}" if ins_machine else "")
+                            + (" · Best Window" if ins.get('date_from') else "")
+                            + (f" · {ins.get('shift_filter')}" if ins.get('shift_filter') else "")
                         )
                         btn_key = f"ins_cr_{idx}_{ins['rule']}_{key_suffix}"
                         if st.button(btn_label, key=btn_key):
-                            st.session_state['cr_dialog_tool']    = ins_tool
-                            st.session_state['cr_dialog_machine'] = ins_machine
-                            st.session_state['cr_dialog_df_proc'] = part_proc if not part_proc.empty else df_processed_global
-                            st.session_state['cr_dialog_config']  = config
+                            st.session_state['cr_dialog_tool']         = ins_tool
+                            st.session_state['cr_dialog_machine']      = ins_machine
+                            st.session_state['cr_dialog_df_proc']      = part_proc if not part_proc.empty else df_processed_global
+                            st.session_state['cr_dialog_config']       = config
+                            st.session_state['cr_dialog_date_from']    = ins.get('date_from')
+                            st.session_state['cr_dialog_date_to']      = ins.get('date_to')
+                            st.session_state['cr_dialog_shift_filter'] = ins.get('shift_filter')
                             _cr_pairing_dialog()
 
                     st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)

@@ -2584,6 +2584,7 @@ def run_part_analysis(
                         'rule': 'shift_degradation',
                         'severity': 'high',
                         'tool_id': tid, 'machine_id': mid,
+                        'shift_filter': min_s,
                         'title': f"{tid} / {mid} — Shift degradation detected ({drop:.0f} pp)",
                         'detail': (
                             f"{tid} on {mid} drops {drop:.0f} pp between best and worst shift. "
@@ -2597,6 +2598,7 @@ def run_part_analysis(
                         'rule': 'shift_degradation',
                         'severity': 'medium',
                         'tool_id': tid, 'machine_id': mid,
+                        'shift_filter': min_s,
                         'title': f"{tid} / {mid} — Shift variation ({drop:.0f} pp)",
                         'detail': (
                             f"{tid} on {mid} shows {drop:.0f} pp variation across shifts "
@@ -2652,13 +2654,15 @@ def run_part_analysis(
                 if eff > best_run_eff:
                     best_run_eff  = eff
                     best_run_info = {
-                        'tool_id':    tid,
-                        'machine_id': mid,
-                        'start':      rg['shot_time'].min().strftime('%d %b %Y %H:%M'),
-                        'end':        rg['shot_time'].max().strftime('%d %b %Y %H:%M'),
-                        'eff':        round(eff, 0),
-                        'hrs':        round(dur / 3600, 1),
-                        'period':     rg['session_period'].iloc[0] if 'session_period' in rg.columns else '—',
+                        'tool_id':      tid,
+                        'machine_id':   mid,
+                        'start':        rg['shot_time'].min().strftime('%d %b %Y %H:%M'),
+                        'end':          rg['shot_time'].max().strftime('%d %b %Y %H:%M'),
+                        'ts_start':     rg['shot_time'].min(),
+                        'ts_end':       rg['shot_time'].max(),
+                        'eff':          round(eff, 0),
+                        'hrs':          round(dur / 3600, 1),
+                        'period':       rg['session_period'].iloc[0] if 'session_period' in rg.columns else '—',
                     }
             if best_run_info:
                 r = best_run_info
@@ -2666,6 +2670,7 @@ def run_part_analysis(
                     'rule': 'best_window',
                     'severity': 'info',
                     'tool_id': r['tool_id'], 'machine_id': r['machine_id'],
+                    'date_from': r['ts_start'], 'date_to': r['ts_end'],
                     'title': f"Peak performance: {r['tool_id']} on {r['machine_id']} — {r['eff']:.0f}% cap eff",
                     'detail': (
                         f"Best recorded production window: {r['start']} → {r['end']} "
