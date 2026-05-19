@@ -1526,10 +1526,14 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
         else:
             # ── KPI strip ─────────────────────────────────────────────────────
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Suppliers",        f"{len(scorecard)}")
-            k2.metric("Total Tools",      f"{fit_df['tool_id'].nunique()}")
-            k3.metric("Total Parts",      f"{fit_df['total_parts'].sum():,.0f}")
-            k4.metric("Production Hours", f"{fit_df['production_hrs'].sum():,.0f} h")
+            k1.metric("Suppliers",        f"{len(scorecard)}",
+                      help="Number of unique suppliers in the current filter scope")
+            k2.metric("Total Tools",      f"{fit_df['tool_id'].nunique()}",
+                      help="Unique tools with at least one recorded tool-machine pairing")
+            k3.metric("Total Parts",      f"{fit_df['total_parts'].sum():,.0f}",
+                      help="Cumulative parts produced across all tool-machine pairings")
+            k4.metric("Production Hours", f"{fit_df['production_hrs'].sum():,.0f} h",
+                      help="Total active run time across all pairings (excludes downtime)")
 
             st.markdown("---")
 
@@ -1555,19 +1559,51 @@ Thresholds (95 / 75) are consistent with the rest of the app (Risk Tower uses 95
 
             with st.expander("⚙️ Adjust Colour Thresholds", expanded=False):
                 _tc1, _tc2, _tc3, _tc4 = st.columns(4)
-                mer_good    = _tc1.number_input("Match Eff — Good ≥ (%)",    0, 100, 75, 5, key=f"mer_good{key_suffix}")
-                mer_monitor = _tc2.number_input("Match Eff — Monitor ≥ (%)", 0, 100, 50, 5, key=f"mer_mon{key_suffix}")
-                ce_good     = _tc3.number_input("Cap Eff — Good ≥ (%)",      0, 100, 95, 5, key=f"ce_good{key_suffix}")
-                ce_monitor  = _tc4.number_input("Cap Eff — Monitor ≥ (%)",   0, 100, 75, 5, key=f"ce_mon{key_suffix}")
+                mer_good    = _tc1.number_input("Match Eff — Good ≥ (%)",    0, 100, 75, 5,
+                                                 help="Pairings % above which supplier is rated Good",
+                                                 key=f"mer_good{key_suffix}")
+                mer_monitor = _tc2.number_input("Match Eff — Monitor ≥ (%)", 0, 100, 50, 5,
+                                                 help="Pairings % above which supplier is Monitor; below = At Risk",
+                                                 key=f"mer_mon{key_suffix}")
+                ce_good     = _tc3.number_input("Cap Eff — Good ≥ (%)",      0, 100, 95, 5,
+                                                 help="Cap Efficiency % above which supplier is rated Good. Default matches Risk Tower stable threshold (95%)",
+                                                 key=f"ce_good{key_suffix}")
+                ce_monitor  = _tc4.number_input("Cap Eff — Monitor ≥ (%)",   0, 100, 75, 5,
+                                                 help="Cap Efficiency % above which supplier is Monitor; below = At Risk",
+                                                 key=f"ce_mon{key_suffix}")
 
-            def _html_legend(items):
-                """Renders a compact inline colour legend as HTML."""
-                parts = [
-                    f'<span style="color:{col};font-size:1.1em;">■</span>'
-                    f'<span style="font-size:0.82em;margin-left:3px;margin-right:12px;">{lbl}</span>'
-                    for lbl, col in items
-                ]
-                return '<div style="margin-bottom:4px;">' + ''.join(parts) + '</div>'
+            # ── Combined colour legend table (updates with threshold controls) ─
+            _G = cr_CG_utils.PASTEL_COLORS['green']
+            _O = cr_CG_utils.PASTEL_COLORS['orange']
+            _R = cr_CG_utils.PASTEL_COLORS['red']
+            st.markdown(f"""
+<table style="width:100%;border-collapse:collapse;font-size:0.82em;margin:6px 0 14px 0;">
+  <thead>
+    <tr>
+      <th style="padding:5px 10px;text-align:left;background:#2a2a3a;border:1px solid #444;">Status</th>
+      <th style="padding:5px 10px;text-align:center;background:#2a2a3a;border:1px solid #444;">Match Efficiency Rate</th>
+      <th style="padding:5px 10px;text-align:center;background:#2a2a3a;border:1px solid #444;">Avg Cap Efficiency</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr style="background:rgba(119,221,119,0.12);">
+      <td style="padding:5px 10px;border:1px solid #444;color:{_G};font-weight:bold;">🟢 Good</td>
+      <td style="padding:5px 10px;border:1px solid #444;text-align:center;">≥ {int(mer_good)}%</td>
+      <td style="padding:5px 10px;border:1px solid #444;text-align:center;">≥ {int(ce_good)}%</td>
+    </tr>
+    <tr style="background:rgba(255,179,71,0.12);">
+      <td style="padding:5px 10px;border:1px solid #444;color:{_O};font-weight:bold;">🟡 Monitor</td>
+      <td style="padding:5px 10px;border:1px solid #444;text-align:center;">{int(mer_monitor)}–{int(mer_good)-1}%</td>
+      <td style="padding:5px 10px;border:1px solid #444;text-align:center;">{int(ce_monitor)}–{int(ce_good)-1}%</td>
+    </tr>
+    <tr style="background:rgba(255,105,97,0.12);">
+      <td style="padding:5px 10px;border:1px solid #444;color:{_R};font-weight:bold;">🔴 At Risk</td>
+      <td style="padding:5px 10px;border:1px solid #444;text-align:center;">< {int(mer_monitor)}%</td>
+      <td style="padding:5px 10px;border:1px solid #444;text-align:center;">< {int(ce_monitor)}%</td>
+    </tr>
+  </tbody>
+</table>
+""", unsafe_allow_html=True)
 
             c_left, c_right = st.columns(2)
             CHART_H = 300
@@ -1581,11 +1617,6 @@ Thresholds (95 / 75) are consistent with the rest of the app (Risk Tower uses 95
                         C['green'] if v >= mer_good else (C['orange'] if v >= mer_monitor else C['red'])
                         for v in mer_df['match_efficiency_pct']
                     ]
-                    st.markdown(_html_legend([
-                        (f'≥ {mer_good}% Good',           C['green']),
-                        (f'{mer_monitor}–{mer_good-1}% Monitor', C['orange']),
-                        (f'< {mer_monitor}% At Risk',      C['red']),
-                    ]), unsafe_allow_html=True)
                     fig_mer = go.Figure(go.Bar(
                         x=mer_df['supplier_id'], y=mer_df['match_efficiency_pct'],
                         marker_color=mer_colors,
@@ -1646,11 +1677,6 @@ Thresholds (95 / 75) are consistent with the rest of the app (Risk Tower uses 95
                         C['green'] if v >= ce_good else (C['orange'] if v >= ce_monitor else C['red'])
                         for v in scorecard['avg_cap_eff']
                     ]
-                    st.markdown(_html_legend([
-                        (f'≥ {ce_good}% Good',             C['green']),
-                        (f'{ce_monitor}–{ce_good-1}% Monitor', C['orange']),
-                        (f'< {ce_monitor}% At Risk',        C['red']),
-                    ]), unsafe_allow_html=True)
                     fig_bar = go.Figure(go.Bar(
                         x=scorecard['supplier_id'], y=scorecard['avg_cap_eff'],
                         marker_color=ce_colors,
