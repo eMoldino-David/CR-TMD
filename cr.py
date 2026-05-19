@@ -1532,96 +1532,167 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
             k4.metric("Production Hours", f"{fit_df['production_hrs'].sum():,.0f} h")
 
             st.markdown("---")
+
+            # ── Metric legend (collapsed) ──────────────────────────────────────
+            with st.expander("ℹ️ How to Read These Metrics", expanded=False):
+                st.markdown(f"""
+**Tool-Machine Pairing** — A unique combination of one tool and one machine that has run in production.
+Each pairing aggregates all production runs on that combination.
+
+**Match Efficiency Rate** — The % of a supplier's tool-machine pairings that achieved a Cap Efficiency ≥ 85%.
+An *efficient pairing* is one where the average Cap Efficiency across all its production runs meets or exceeds 85%.
+- 🟢 ≥ 75% of pairings efficient — Good
+- 🟡 50–74% — Monitor
+- 🔴 < 50% — At Risk
+
+**Avg Cap Efficiency %** — Average Cap Efficiency across all of a supplier's tool-machine pairings.
+Cap Efficiency = Actual Output ÷ Optimal Output (what the machine could have produced running continuously at Approved CT with no stops or slow cycles).
+- 🟢 ≥ 90% — Good
+- 🟡 75–89% — Monitor
+- 🔴 < 75% — At Risk
+
+**Stability %** — Run Rate Time Stability: proportion of total run time spent in active production (not in downtime). Equivalent to *RR Time Stability* shown elsewhere in the app.
+
+**MTBF / MTTR** — Mean Time Between Failures / Mean Time To Recover, in minutes. Based on Run Rate stop events.
+                """)
+
             c_left, c_right = st.columns(2)
-            CHART_H = 280
+            CHART_H = 300
 
             # ── Match Efficiency Rate bar ──────────────────────────────────────
             with c_left:
                 st.markdown("##### Match Efficiency Rate by Supplier")
-                st.caption("% of sessions where Cap Efficiency ≥ 85%")
+                st.caption("% of tool-machine pairings with Cap Efficiency ≥ 85%")
                 if not mer_df.empty:
                     mer_colors = [C['green'] if v>=75 else (C['orange'] if v>=50 else C['red'])
                                   for v in mer_df['match_efficiency_pct']]
-                    fig_mer = go.Figure(go.Bar(
+                    fig_mer = go.Figure()
+                    # Legend entries (square markers, no chart impact)
+                    for _lbl, _col in [('≥ 75% (Good)', C['green']),
+                                       ('50–74% (Monitor)', C['orange']),
+                                       ('< 50% (At Risk)', C['red'])]:
+                        fig_mer.add_trace(go.Scatter(
+                            x=[None], y=[None], mode='markers', name=_lbl,
+                            marker=dict(color=_col, size=10, symbol='square'),
+                            showlegend=True,
+                        ))
+                    fig_mer.add_trace(go.Bar(
                         x=mer_df['supplier_id'], y=mer_df['match_efficiency_pct'],
                         marker_color=mer_colors,
                         text=mer_df['match_efficiency_pct'].round(0).astype(int).astype(str)+'%',
                         textposition='outside',
                         customdata=np.stack([mer_df['efficient_sessions'],
                                              mer_df['total_sessions'],
-                                             mer_df['avg_cap_eff']], axis=-1),
-                        hovertemplate="<b>%{x}</b><br>Match Eff: %{y:.0f}%<br>"
-                                      "Efficient: %{customdata[0]} / %{customdata[1]} sessions<br>"
-                                      "Avg Cap Eff: %{customdata[2]:.0f}%<extra></extra>",
+                                             mer_df['machines_used']], axis=-1),
+                        hovertemplate=(
+                            "<b>%{x}</b><br>"
+                            "Match Efficiency: %{y:.0f}%<br>"
+                            "Efficient Pairings: %{customdata[0]} / %{customdata[1]}<br>"
+                            "Machines: %{customdata[2]}<extra></extra>"
+                        ),
+                        showlegend=False,
                     ))
-                    fig_mer.update_layout(yaxis=dict(range=[0,115],title="Match Eff %"),
-                                         height=CHART_H, margin=dict(t=10,b=30,l=40,r=10))
+                    fig_mer.update_layout(
+                        yaxis=dict(range=[0, 115], title="Match Efficiency %"),
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02,
+                                    xanchor='left', x=0, font=dict(size=11)),
+                        height=CHART_H, margin=dict(t=50, b=30, l=40, r=10),
+                    )
                     st.plotly_chart(fig_mer, use_container_width=True, key=f"ov_mer{key_suffix}")
 
-                    mer_disp = mer_df[['supplier_id','total_sessions','efficient_sessions',
-                                        'match_efficiency_pct','avg_cap_eff','total_parts',
-                                        'production_hrs','tools']].rename(columns={
-                        'supplier_id':'Supplier','total_sessions':'Sessions',
-                        'efficient_sessions':'Efficient','match_efficiency_pct':'Match Eff %',
-                        'avg_cap_eff':'Avg Cap Eff %','total_parts':'Parts',
-                        'production_hrs':'Prod Hrs','tools':'Tools',
+                    # Table: Supplier | Machines | Tools | Pairings Tested | Efficient Pairings | Match Eff % | Parts | Prod Hrs
+                    mer_disp = mer_df[['supplier_id', 'machines_used', 'tools',
+                                       'total_sessions', 'efficient_sessions',
+                                       'match_efficiency_pct', 'total_parts',
+                                       'production_hrs']].rename(columns={
+                        'supplier_id':          'Supplier',
+                        'machines_used':        'Machines',
+                        'tools':                'Tools',
+                        'total_sessions':       'Pairings Tested',
+                        'efficient_sessions':   'Efficient Pairings',
+                        'match_efficiency_pct': 'Match Eff %',
+                        'total_parts':          'Parts',
+                        'production_hrs':       'Prod Hrs',
                     })
                     def _style_mer(row):
                         styles = [''] * len(row)
                         for i, col in enumerate(mer_disp.columns):
                             if col == 'Match Eff %':
                                 v = row[col]
-                                styles[i] = (f'color:{C["green"]};font-weight:bold' if v>=75
-                                             else (f'color:{C["orange"]}' if v>=50 else f'color:{C["red"]}'))
+                                styles[i] = (f'color:{C["green"]};font-weight:bold' if v >= 75
+                                             else (f'color:{C["orange"]}' if v >= 50 else f'color:{C["red"]}'))
                         return styles
-                    st.dataframe(mer_disp.style.apply(_style_mer,axis=1)
-                                 .format({'Match Eff %':'{:.0f}%','Avg Cap Eff %':'{:.0f}%',
-                                          'Parts':'{:,.0f}','Prod Hrs':'{:.0f}'}, na_rep='—'),
-                                 use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        mer_disp.style.apply(_style_mer, axis=1)
+                                .format({'Match Eff %': '{:.0f}%', 'Parts': '{:,.0f}',
+                                         'Prod Hrs': '{:.0f}'}, na_rep='—'),
+                        use_container_width=True, hide_index=True,
+                    )
 
-            # ── Cap Efficiency bar ────────────────────────────────────────────
+            # ── Avg Cap Efficiency bar ─────────────────────────────────────────
             with c_right:
                 st.markdown("##### Avg Cap Efficiency by Supplier")
-                st.caption("Average across all machine-tool sessions")
+                st.caption("Average across all tool-machine pairings")
                 if not scorecard.empty:
-                    colors = [C['green'] if v==scorecard['avg_cap_eff'].max()
-                              else (C['red'] if v==scorecard['avg_cap_eff'].min() else C['blue'])
-                              for v in scorecard['avg_cap_eff']]
-                    fig_bar = go.Figure(go.Bar(
+                    ce_colors = [C['green'] if v >= 90 else (C['orange'] if v >= 75 else C['red'])
+                                 for v in scorecard['avg_cap_eff']]
+                    fig_bar = go.Figure()
+                    for _lbl, _col in [('≥ 90% (Good)', C['green']),
+                                       ('75–89% (Monitor)', C['orange']),
+                                       ('< 75% (At Risk)', C['red'])]:
+                        fig_bar.add_trace(go.Scatter(
+                            x=[None], y=[None], mode='markers', name=_lbl,
+                            marker=dict(color=_col, size=10, symbol='square'),
+                            showlegend=True,
+                        ))
+                    fig_bar.add_trace(go.Bar(
                         x=scorecard['supplier_id'], y=scorecard['avg_cap_eff'],
-                        marker_color=colors,
+                        marker_color=ce_colors,
                         text=scorecard['avg_cap_eff'].round(0).astype(int).astype(str)+'%',
                         textposition='outside',
+                        showlegend=False,
                     ))
                     fig_bar.update_layout(
-                        yaxis=dict(range=[max(0,scorecard['avg_cap_eff'].min()-10),115],
-                                   title="Cap Eff %"),
-                        height=CHART_H, margin=dict(t=10,b=30,l=40,r=10),
+                        yaxis=dict(range=[max(0, scorecard['avg_cap_eff'].min() - 10), 115],
+                                   title="Cap Efficiency %"),
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02,
+                                    xanchor='left', x=0, font=dict(size=11)),
+                        height=CHART_H, margin=dict(t=50, b=30, l=40, r=10),
                     )
                     st.plotly_chart(fig_bar, use_container_width=True, key=f"ov_cap{key_suffix}")
 
-                    sc_disp = scorecard[['rank','supplier_id','total_tools','total_machines',
-                                          'total_parts','production_hrs','avg_cap_eff',
-                                          'avg_stability','avg_mtbf','avg_mttr']].rename(columns={
-                        'rank':'#','supplier_id':'Supplier','total_tools':'Tools',
-                        'total_machines':'Machines','total_parts':'Parts',
-                        'production_hrs':'Prod Hrs','avg_cap_eff':'Cap Efficiency %',
-                        'avg_stability':'Stability %','avg_mtbf':'MTBF (min)',
-                        'avg_mttr':'MTTR (min)',
+                    # Table: # | Supplier | Machines | Tools | Prod Runs | Parts | Prod Hrs | Cap Efficiency % | Stability % | MTBF | MTTR
+                    sc_disp = scorecard[['rank', 'supplier_id', 'total_machines', 'total_tools',
+                                          'total_runs', 'total_parts', 'production_hrs',
+                                          'avg_cap_eff', 'avg_stability',
+                                          'avg_mtbf', 'avg_mttr']].rename(columns={
+                        'rank':           '#',
+                        'supplier_id':    'Supplier',
+                        'total_machines': 'Machines',
+                        'total_tools':    'Tools',
+                        'total_runs':     'Prod Runs',
+                        'total_parts':    'Parts',
+                        'production_hrs': 'Prod Hrs',
+                        'avg_cap_eff':    'Cap Efficiency %',
+                        'avg_stability':  'Stability %',
+                        'avg_mtbf':       'MTBF (min)',
+                        'avg_mttr':       'MTTR (min)',
                     })
                     def _style_sc(row):
                         styles = [''] * len(row)
                         for i, col in enumerate(sc_disp.columns):
-                            if col == 'Cap Eff %':
+                            if col == 'Cap Efficiency %':
                                 v = row[col]
-                                styles[i] = (f'color:{C["green"]};font-weight:bold' if v>=90
-                                             else (f'color:{C["orange"]}' if v>=75 else f'color:{C["red"]}'))
+                                styles[i] = (f'color:{C["green"]};font-weight:bold' if v >= 90
+                                             else (f'color:{C["orange"]}' if v >= 75 else f'color:{C["red"]}'))
                         return styles
-                    st.dataframe(sc_disp.style.apply(_style_sc,axis=1)
-                                 .format({'Cap Eff %':'{:.0f}%','Stability %':'{:.0f}%',
-                                          'MTBF (min)':'{:.0f}','MTTR (min)':'{:.1f}',
-                                          'Parts':'{:,.0f}','Prod Hrs':'{:.0f}'}, na_rep='—'),
-                                 use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        sc_disp.style.apply(_style_sc, axis=1)
+                               .format({'Cap Efficiency %': '{:.0f}%', 'Stability %': '{:.0f}%',
+                                        'MTBF (min)': '{:.0f}', 'MTTR (min)': '{:.1f}',
+                                        'Parts': '{:,.0f}', 'Prod Hrs': '{:.0f}'}, na_rep='—'),
+                        use_container_width=True, hide_index=True,
+                    )
 
             # ── Weekly report download ─────────────────────────────────────────
             st.markdown("---")
