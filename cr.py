@@ -1546,7 +1546,7 @@ and < 50% signals a supplier where the majority of pairings are underperforming.
 
 **Avg Cap Efficiency %** — Average Cap Efficiency across all of a supplier's tool-machine pairings.
 Cap Efficiency = Actual Output ÷ Optimal Output (what the machine could have produced running continuously at Approved CT).
-Thresholds (90 / 75) are consistent with the rest of the app (Risk Tower, Capacity Dashboard).
+Thresholds (95 / 75) are consistent with the rest of the app (Risk Tower uses 95% as the stable threshold).
 
 **RR Time Stability %** — Proportion of total run time spent in active production (not in Run Rate downtime). Same metric as *Run Rate Time Stability* on the Capacity Dashboard.
 
@@ -1557,7 +1557,7 @@ Thresholds (90 / 75) are consistent with the rest of the app (Risk Tower, Capaci
                 _tc1, _tc2, _tc3, _tc4 = st.columns(4)
                 mer_good    = _tc1.number_input("Match Eff — Good ≥ (%)",    0, 100, 75, 5, key=f"mer_good{key_suffix}")
                 mer_monitor = _tc2.number_input("Match Eff — Monitor ≥ (%)", 0, 100, 50, 5, key=f"mer_mon{key_suffix}")
-                ce_good     = _tc3.number_input("Cap Eff — Good ≥ (%)",      0, 100, 90, 5, key=f"ce_good{key_suffix}")
+                ce_good     = _tc3.number_input("Cap Eff — Good ≥ (%)",      0, 100, 95, 5, key=f"ce_good{key_suffix}")
                 ce_monitor  = _tc4.number_input("Cap Eff — Monitor ≥ (%)",   0, 100, 75, 5, key=f"ce_mon{key_suffix}")
 
             def _html_legend(items):
