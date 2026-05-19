@@ -1533,28 +1533,41 @@ def render_machine_fit_tab(df_processed_global, config, machine_master=None, too
 
             st.markdown("---")
 
-            # ── Metric legend (collapsed) ──────────────────────────────────────
+            # ── Metric legend + threshold controls (collapsed) ────────────────
             with st.expander("ℹ️ How to Read These Metrics", expanded=False):
-                st.markdown(f"""
-**Tool-Machine Pairing** — A unique combination of one tool and one machine that has run in production.
-Each pairing aggregates all production runs on that combination.
+                st.markdown("""
+**Tool-Machine Pairing** — A unique combination of one tool and one machine that has been run in production.
+Each pairing aggregates all production runs for that combination.
 
-**Match Efficiency Rate** — The % of a supplier's tool-machine pairings that achieved a Cap Efficiency ≥ 85%.
-An *efficient pairing* is one where the average Cap Efficiency across all its production runs meets or exceeds 85%.
-- 🟢 ≥ 75% of pairings efficient — Good
-- 🟡 50–74% — Monitor
-- 🔴 < 50% — At Risk
+**Match Efficiency Rate** — The % of a supplier's tool-machine pairings that achieved Cap Efficiency ≥ 85%.
+An *efficient pairing* is one where the average Cap Efficiency across all its production runs meets or exceeds the 85% threshold.
+Colour bands are adjustable below — defaults reflect that hitting ≥ 75% of pairings efficiently is a realistic good benchmark,
+and < 50% signals a supplier where the majority of pairings are underperforming.
 
 **Avg Cap Efficiency %** — Average Cap Efficiency across all of a supplier's tool-machine pairings.
-Cap Efficiency = Actual Output ÷ Optimal Output (what the machine could have produced running continuously at Approved CT with no stops or slow cycles).
-- 🟢 ≥ 90% — Good
-- 🟡 75–89% — Monitor
-- 🔴 < 75% — At Risk
+Cap Efficiency = Actual Output ÷ Optimal Output (what the machine could have produced running continuously at Approved CT).
+Thresholds (90 / 75) are consistent with the rest of the app (Risk Tower, Capacity Dashboard).
 
-**Stability %** — Run Rate Time Stability: proportion of total run time spent in active production (not in downtime). Equivalent to *RR Time Stability* shown elsewhere in the app.
+**RR Time Stability %** — Proportion of total run time spent in active production (not in Run Rate downtime). Same metric as *Run Rate Time Stability* on the Capacity Dashboard.
 
-**MTBF / MTTR** — Mean Time Between Failures / Mean Time To Recover, in minutes. Based on Run Rate stop events.
+**MTBF / MTTR** — Mean Time Between Failures / Mean Time To Recover, in minutes. Derived from Run Rate stop events.
                 """)
+
+            with st.expander("⚙️ Adjust Colour Thresholds", expanded=False):
+                _tc1, _tc2, _tc3, _tc4 = st.columns(4)
+                mer_good    = _tc1.number_input("Match Eff — Good ≥ (%)",    0, 100, 75, 5, key=f"mer_good{key_suffix}")
+                mer_monitor = _tc2.number_input("Match Eff — Monitor ≥ (%)", 0, 100, 50, 5, key=f"mer_mon{key_suffix}")
+                ce_good     = _tc3.number_input("Cap Eff — Good ≥ (%)",      0, 100, 90, 5, key=f"ce_good{key_suffix}")
+                ce_monitor  = _tc4.number_input("Cap Eff — Monitor ≥ (%)",   0, 100, 75, 5, key=f"ce_mon{key_suffix}")
+
+            def _html_legend(items):
+                """Renders a compact inline colour legend as HTML."""
+                parts = [
+                    f'<span style="color:{col};font-size:1.1em;">■</span>'
+                    f'<span style="font-size:0.82em;margin-left:3px;margin-right:12px;">{lbl}</span>'
+                    for lbl, col in items
+                ]
+                return '<div style="margin-bottom:4px;">' + ''.join(parts) + '</div>'
 
             c_left, c_right = st.columns(2)
             CHART_H = 300
@@ -1564,19 +1577,16 @@ Cap Efficiency = Actual Output ÷ Optimal Output (what the machine could have pr
                 st.markdown("##### Match Efficiency Rate by Supplier")
                 st.caption("% of tool-machine pairings with Cap Efficiency ≥ 85%")
                 if not mer_df.empty:
-                    mer_colors = [C['green'] if v>=75 else (C['orange'] if v>=50 else C['red'])
-                                  for v in mer_df['match_efficiency_pct']]
-                    fig_mer = go.Figure()
-                    # Legend entries (square markers, no chart impact)
-                    for _lbl, _col in [('≥ 75% (Good)', C['green']),
-                                       ('50–74% (Monitor)', C['orange']),
-                                       ('< 50% (At Risk)', C['red'])]:
-                        fig_mer.add_trace(go.Scatter(
-                            x=[None], y=[None], mode='markers', name=_lbl,
-                            marker=dict(color=_col, size=10, symbol='square'),
-                            showlegend=True,
-                        ))
-                    fig_mer.add_trace(go.Bar(
+                    mer_colors = [
+                        C['green'] if v >= mer_good else (C['orange'] if v >= mer_monitor else C['red'])
+                        for v in mer_df['match_efficiency_pct']
+                    ]
+                    st.markdown(_html_legend([
+                        (f'≥ {mer_good}% Good',           C['green']),
+                        (f'{mer_monitor}–{mer_good-1}% Monitor', C['orange']),
+                        (f'< {mer_monitor}% At Risk',      C['red']),
+                    ]), unsafe_allow_html=True)
+                    fig_mer = go.Figure(go.Bar(
                         x=mer_df['supplier_id'], y=mer_df['match_efficiency_pct'],
                         marker_color=mer_colors,
                         text=mer_df['match_efficiency_pct'].round(0).astype(int).astype(str)+'%',
@@ -1590,13 +1600,11 @@ Cap Efficiency = Actual Output ÷ Optimal Output (what the machine could have pr
                             "Efficient Pairings: %{customdata[0]} / %{customdata[1]}<br>"
                             "Machines: %{customdata[2]}<extra></extra>"
                         ),
-                        showlegend=False,
                     ))
                     fig_mer.update_layout(
                         yaxis=dict(range=[0, 115], title="Match Efficiency %"),
-                        legend=dict(orientation='h', yanchor='bottom', y=1.02,
-                                    xanchor='left', x=0, font=dict(size=11)),
-                        height=CHART_H, margin=dict(t=50, b=30, l=40, r=10),
+                        showlegend=False,
+                        height=CHART_H, margin=dict(t=10, b=30, l=40, r=10),
                     )
                     st.plotly_chart(fig_mer, use_container_width=True, key=f"ov_mer{key_suffix}")
 
@@ -1619,8 +1627,8 @@ Cap Efficiency = Actual Output ÷ Optimal Output (what the machine could have pr
                         for i, col in enumerate(mer_disp.columns):
                             if col == 'Match Eff %':
                                 v = row[col]
-                                styles[i] = (f'color:{C["green"]};font-weight:bold' if v >= 75
-                                             else (f'color:{C["orange"]}' if v >= 50 else f'color:{C["red"]}'))
+                                styles[i] = (f'color:{C["green"]};font-weight:bold' if v >= mer_good
+                                             else (f'color:{C["orange"]}' if v >= mer_monitor else f'color:{C["red"]}'))
                         return styles
                     st.dataframe(
                         mer_disp.style.apply(_style_mer, axis=1)
@@ -1634,30 +1642,26 @@ Cap Efficiency = Actual Output ÷ Optimal Output (what the machine could have pr
                 st.markdown("##### Avg Cap Efficiency by Supplier")
                 st.caption("Average across all tool-machine pairings")
                 if not scorecard.empty:
-                    ce_colors = [C['green'] if v >= 90 else (C['orange'] if v >= 75 else C['red'])
-                                 for v in scorecard['avg_cap_eff']]
-                    fig_bar = go.Figure()
-                    for _lbl, _col in [('≥ 90% (Good)', C['green']),
-                                       ('75–89% (Monitor)', C['orange']),
-                                       ('< 75% (At Risk)', C['red'])]:
-                        fig_bar.add_trace(go.Scatter(
-                            x=[None], y=[None], mode='markers', name=_lbl,
-                            marker=dict(color=_col, size=10, symbol='square'),
-                            showlegend=True,
-                        ))
-                    fig_bar.add_trace(go.Bar(
+                    ce_colors = [
+                        C['green'] if v >= ce_good else (C['orange'] if v >= ce_monitor else C['red'])
+                        for v in scorecard['avg_cap_eff']
+                    ]
+                    st.markdown(_html_legend([
+                        (f'≥ {ce_good}% Good',             C['green']),
+                        (f'{ce_monitor}–{ce_good-1}% Monitor', C['orange']),
+                        (f'< {ce_monitor}% At Risk',        C['red']),
+                    ]), unsafe_allow_html=True)
+                    fig_bar = go.Figure(go.Bar(
                         x=scorecard['supplier_id'], y=scorecard['avg_cap_eff'],
                         marker_color=ce_colors,
                         text=scorecard['avg_cap_eff'].round(0).astype(int).astype(str)+'%',
                         textposition='outside',
-                        showlegend=False,
                     ))
                     fig_bar.update_layout(
                         yaxis=dict(range=[max(0, scorecard['avg_cap_eff'].min() - 10), 115],
                                    title="Cap Efficiency %"),
-                        legend=dict(orientation='h', yanchor='bottom', y=1.02,
-                                    xanchor='left', x=0, font=dict(size=11)),
-                        height=CHART_H, margin=dict(t=50, b=30, l=40, r=10),
+                        showlegend=False,
+                        height=CHART_H, margin=dict(t=10, b=30, l=40, r=10),
                     )
                     st.plotly_chart(fig_bar, use_container_width=True, key=f"ov_cap{key_suffix}")
 
@@ -1674,7 +1678,7 @@ Cap Efficiency = Actual Output ÷ Optimal Output (what the machine could have pr
                         'total_parts':    'Parts',
                         'production_hrs': 'Prod Hrs',
                         'avg_cap_eff':    'Cap Efficiency %',
-                        'avg_stability':  'Stability %',
+                        'avg_stability':  'RR Time Stability %',
                         'avg_mtbf':       'MTBF (min)',
                         'avg_mttr':       'MTTR (min)',
                     })
@@ -1688,7 +1692,7 @@ Cap Efficiency = Actual Output ÷ Optimal Output (what the machine could have pr
                         return styles
                     st.dataframe(
                         sc_disp.style.apply(_style_sc, axis=1)
-                               .format({'Cap Efficiency %': '{:.0f}%', 'Stability %': '{:.0f}%',
+                               .format({'Cap Efficiency %': '{:.0f}%', 'RR Time Stability %': '{:.0f}%',
                                         'MTBF (min)': '{:.0f}', 'MTTR (min)': '{:.1f}',
                                         'Parts': '{:,.0f}', 'Prod Hrs': '{:.0f}'}, na_rep='—'),
                         use_container_width=True, hide_index=True,
