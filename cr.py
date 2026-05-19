@@ -1727,7 +1727,7 @@ Thresholds (95 / 75) are consistent with the rest of the app (Risk Tower uses 95
             # ── Weekly report download ─────────────────────────────────────────
             st.markdown("---")
             st.markdown("#### 📥 Weekly Report")
-            recs_for_report = cr_CG_utils.compute_recommendations(fit_df)
+            recs_for_report = cr_CG_utils.compute_part_recommendations(fit_df, copy_map)
             rankings_for_report = cr_CG_utils.compute_machine_tool_rankings(fit_df)
             report_bytes = cr_CG_utils.generate_weekly_report(
                 fit_df=fit_df,
@@ -2028,120 +2028,162 @@ Thresholds (95 / 75) are consistent with the rest of the app (Risk Tower uses 95
             st.plotly_chart(fig_rank, use_container_width=True, key=f"pc_rank{key_suffix}")
 
     with sub_pairings:
-        st.subheader("Optimal Machine-Tool Pairings")
+        st.subheader("Optimal Machine per Part")
         st.caption(
-            "For each machine, the best and worst performing tools are identified from historical data. "
-            "Gain = extra parts per hour if the best tool ran instead of the worst."
+            "For each part, the recommended machine is identified from historical Cap Efficiency data. "
+            "Sorted by gain opportunity — the largest gap between best and worst machine is at the top."
         )
 
-        recs_df = cr_CG_utils.compute_recommendations(fit_df)
+        part_recs = cr_CG_utils.compute_part_recommendations(fit_df, copy_map)
 
-        if recs_df.empty:
-            st.warning("Not enough data to generate pairings.")
+        if part_recs.empty:
+            st.warning("Not enough machine data to generate part recommendations.")
         else:
-            # Compatibility: cap_eff_gain added in latest cr_utils; fall back to cap_eff_spread
-            if 'cap_eff_gain' not in recs_df.columns:
-                recs_df['cap_eff_gain'] = recs_df['cap_eff_spread']
-            if 'worst_parts_per_hr' not in recs_df.columns:
-                recs_df['worst_parts_per_hr'] = 0.0
-
-            r1, r2 = st.columns(2)
-            r1.metric("Machines with Data", f"{len(recs_df)}")
-            r2.metric("Total Cap Eff Gain Potential",
-                      f"+{recs_df['cap_eff_gain'].sum():.0f} pp",
-                      help="Sum of cap efficiency gain across all machines if each ran its best tool instead of worst")
+            # ── KPI strip ─────────────────────────────────────────────────────
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Parts with Machine Data", f"{len(part_recs)}",
+                      help="Number of distinct parts (or tools) with at least one machine-tool pairing")
+            r2.metric("Machines Covered", f"{fit_df['machine_id'].nunique()}",
+                      help="Total machines with at least one recorded pairing")
+            r3.metric("Total Gain Opportunity", f"+{part_recs['cap_eff_gain'].sum():.0f} pp",
+                      help="Sum of cap efficiency gain (pp) if every part ran on its optimal machine instead of its worst")
 
             st.markdown("---")
-            st.markdown("#### Recommended Pairings")
-            st.caption(
-                "Ranked by cap efficiency spread. "
-                "**Cap eff gain** = percentage point improvement switching from worst to best tool on that machine. "
-                "Parts/hr shown as context — differs between tools due to cycle time and cavity count."
-            )
 
-            for _, row in recs_df.iterrows():
-                gain = row['cap_eff_gain']
-                best_eff = row['best_cap_eff']
-                # Colour indicator based on best tool's cap efficiency
-                indicator = "🟢" if best_eff >= 90 else ("🟡" if best_eff >= 75 else "🔴")
-
-                with st.expander(
-                    f"{indicator} **{row['machine_id']}** — Best: {row['best_tool']} "
-                    f"({row['best_supplier']}) | +{gain:.0f} pp cap eff gain | "
-                    f"{int(row['tools_compared'])} tools compared"
-                ):
-                    ec1, ec2 = st.columns(2)
-                    with ec1:
-                        st.markdown(f"**✅ Best match: {row['best_tool']}** ({row['best_supplier']})")
-                        st.markdown(f"Cap Efficiency: **{row['best_cap_eff']:.0f}%**")
-                        st.markdown(f"Parts/hr: {row['best_parts_per_hr']:.0f} *(context — depends on CT & cavities)*")
-
-                        best_sessions = fit_df[
-                            (fit_df['tool_id'] == row['best_tool']) &
-                            (fit_df['machine_id'] == row['machine_id'])
-                        ]
-                        if not best_sessions.empty:
-                            st.markdown("**Optimal session metrics:**")
-                            bs = best_sessions.iloc[0]
-                            st.markdown(
-                                f"Stability: {bs['stability_pct']:.0f}% &nbsp;|&nbsp; "
-                                f"MTBF: {bs['mtbf_min']:.0f} min &nbsp;|&nbsp; "
-                                f"MTTR: {bs['mttr_min']:.1f} min  \n"
-                                f"Slow Loss: {bs['slow_loss_parts']:.0f} parts &nbsp;|&nbsp; "
-                                f"Fast Gain: {bs['fast_gain_parts']:.0f} parts  \n"
-                                f"Prod Hrs: {bs['production_hrs']:.0f} &nbsp;|&nbsp; "
-                                f"Parts: {bs['total_parts']:.0f}"
-                            )
-                            btn_key = f"cr_analysis_{row['machine_id']}_{row['best_tool']}"
-                            if st.button("📊 Run CR Analysis on this pairing", key=btn_key):
-                                st.session_state['cr_dialog_tool']    = row['best_tool']
-                                st.session_state['cr_dialog_machine'] = row['machine_id']
-                                st.session_state['cr_dialog_df_proc'] = df_processed_global
-                                st.session_state['cr_dialog_config']  = config
-                                _cr_pairing_dialog()
-
-                    with ec2:
-                        st.markdown(f"**⚠️ Worst match: {row['worst_tool']}** ({row['worst_supplier']})")
-                        st.markdown(f"Cap Efficiency: **{row['worst_cap_eff']:.0f}%**")
-                        st.markdown(f"Parts/hr: {row['worst_parts_per_hr']:.0f} *(context)*")
-                        st.markdown(f"Cap eff gap vs best: **+{gain:.0f} pp**")
-                        st.caption(
-                            "Note: parts/hr difference between tools reflects their cycle time "
-                            "and cavity count — not machine performance. Cap efficiency is the "
-                            "comparable metric across tools."
-                        )
-
-            st.markdown("#### Full Table")
-            best_display = recs_df[[
-                'machine_id','best_tool','best_supplier','best_cap_eff','best_parts_per_hr',
-                'worst_tool','worst_supplier','worst_cap_eff','worst_parts_per_hr',
-                'tools_compared','cap_eff_gain',
+            # ── Summary table ─────────────────────────────────────────────────
+            st.markdown("#### All Parts — Machine Recommendation Summary")
+            st.caption("Cap Eff Gain = best machine minus worst machine for that part. Ranked highest opportunity first.")
+            tbl = part_recs[[
+                'part_id', 'tools', 'machines_tested',
+                'best_machine', 'best_cap_eff',
+                'worst_machine', 'worst_cap_eff',
+                'avg_cap_eff', 'cap_eff_gain',
             ]].rename(columns={
-                'machine_id':'Machine','best_tool':'Best Tool','best_supplier':'Best Supplier',
-                'best_cap_eff':'Best Cap Eff %','best_parts_per_hr':'Best Parts/hr',
-                'worst_tool':'Worst Tool','worst_supplier':'Worst Supplier',
-                'worst_cap_eff':'Worst Cap Eff %','worst_parts_per_hr':'Worst Parts/hr',
-                'tools_compared':'Tools Compared','cap_eff_gain':'Cap Eff Gain (pp)',
+                'part_id':         'Part',
+                'tools':           'Tool(s)',
+                'machines_tested': 'Machines Tested',
+                'best_machine':    'Best Machine',
+                'best_cap_eff':    'Best Cap Eff %',
+                'worst_machine':   'Worst Machine',
+                'worst_cap_eff':   'Worst Cap Eff %',
+                'avg_cap_eff':     'Avg Cap Eff %',
+                'cap_eff_gain':    'Gain (pp)',
             })
 
-            def _style_recs(row):
+            def _style_part_recs(row):
                 styles = [''] * len(row)
-                for i, col in enumerate(best_display.columns):
-                    if col == 'Best Cap Eff %':    styles[i] = f'color:{C["green"]};font-weight:bold'
-                    elif col == 'Worst Cap Eff %': styles[i] = f'color:{C["red"]}'
-                    elif col == 'Cap Eff Gain (pp)':
-                        styles[i] = f'color:{C["orange"]}' if row[col] > 5 else ''
+                for i, col in enumerate(tbl.columns):
+                    if col == 'Best Cap Eff %':
+                        v = row[col]
+                        styles[i] = (f'color:{C["green"]};font-weight:bold' if v >= 95
+                                     else (f'color:{C["orange"]}' if v >= 75 else f'color:{C["red"]}'))
+                    elif col == 'Worst Cap Eff %':
+                        styles[i] = f'color:{C["red"]}'
+                    elif col == 'Gain (pp)':
+                        styles[i] = f'color:{C["orange"]};font-weight:bold' if row[col] > 10 else (
+                                    f'color:{C["orange"]}' if row[col] > 5 else '')
                 return styles
 
             st.dataframe(
-                best_display.style.apply(_style_recs, axis=1)
-                .format({'Best Cap Eff %':'{:.0f}%','Worst Cap Eff %':'{:.0f}%',
-                         'Best Parts/hr':'{:.0f}','Worst Parts/hr':'{:.0f}',
-                         'Cap Eff Gain (pp)':'{:+.0f} pp'}, na_rep='—'),
-                use_container_width=True, hide_index=True
+                tbl.style.apply(_style_part_recs, axis=1)
+                   .format({'Best Cap Eff %': '{:.0f}%', 'Worst Cap Eff %': '{:.0f}%',
+                            'Avg Cap Eff %': '{:.0f}%', 'Gain (pp)': '{:+.0f} pp'}, na_rep='—'),
+                use_container_width=True, hide_index=True,
             )
 
-            # ── Heatmap ───────────────────────────────────────────────────────
+            st.markdown("---")
+            st.markdown("#### Part Detail")
+            st.caption("Expand a part to see its machine-by-machine breakdown and run a CR Analysis on the optimal pairing.")
+
+            for _, row in part_recs.iterrows():
+                indicator = "🟢" if row['best_cap_eff'] >= 95 else ("🟡" if row['best_cap_eff'] >= 75 else "🔴")
+                gain_str  = f"+{row['cap_eff_gain']:.0f} pp gain" if row['cap_eff_gain'] > 0 else "single machine"
+
+                with st.expander(
+                    f"{indicator} **{row['part_id']}** — Best: {row['best_machine']} "
+                    f"({row['best_cap_eff']:.0f}% cap eff) | {gain_str} | "
+                    f"{row['machines_tested']} machine{'s' if row['machines_tested'] != 1 else ''} tested"
+                ):
+                    ec1, ec2 = st.columns(2)
+
+                    with ec1:
+                        st.markdown(f"**✅ Recommended: {row['best_machine']}**")
+                        st.markdown(
+                            f"Cap Efficiency: **{row['best_cap_eff']:.0f}%** &nbsp;|&nbsp; "
+                            f"RR Time Stability: {row['best_stability']:.0f}%  \n"
+                            f"MTBF: {row['best_mtbf']:.0f} min &nbsp;|&nbsp; "
+                            f"MTTR: {row['best_mttr']:.1f} min  \n"
+                            f"Prod Hrs: {row['best_prod_hrs']:.0f} &nbsp;|&nbsp; "
+                            f"Parts: {int(row['best_parts']):,}"
+                        )
+                        st.caption(f"Tool on best machine: {row['best_tool_id']} ({row['best_supplier']})")
+                        btn_key = f"part_rec_cr_{row['part_id']}_{row['best_machine']}"
+                        if st.button("📊 Run CR Analysis on this pairing", key=btn_key):
+                            st.session_state['cr_dialog_tool']    = row['best_tool_id']
+                            st.session_state['cr_dialog_machine'] = row['best_machine']
+                            st.session_state['cr_dialog_df_proc'] = df_processed_global
+                            st.session_state['cr_dialog_config']  = config
+                            _cr_pairing_dialog()
+
+                    with ec2:
+                        if row['machines_tested'] > 1:
+                            st.markdown(f"**⚠️ Avoid: {row['worst_machine']}**")
+                            st.markdown(
+                                f"Cap Efficiency: **{row['worst_cap_eff']:.0f}%**  \n"
+                                f"Cap eff gap vs best: **{row['cap_eff_gain']:.0f} pp**"
+                            )
+                        else:
+                            st.info("Only tested on one machine — no comparison available yet.")
+
+                    # Machine-by-machine breakdown table
+                    part_tool_ids = [t.strip() for t in row['tools'].split(',')]
+                    by_machine_disp = (
+                        fit_df[fit_df['tool_id'].isin(part_tool_ids)]
+                        .groupby('machine_id')
+                        .agg(
+                            cap_eff    =('cap_efficiency_pct', 'mean'),
+                            stability  =('stability_pct',      'mean'),
+                            mtbf       =('mtbf_min',           'mean'),
+                            mttr       =('mttr_min',           'mean'),
+                            prod_hrs   =('production_hrs',     'sum'),
+                            parts      =('total_parts',        'sum'),
+                            runs       =('runs',               'sum'),
+                        )
+                        .round(1)
+                        .reset_index()
+                        .sort_values('cap_eff', ascending=False)
+                        .rename(columns={
+                            'machine_id': 'Machine',
+                            'cap_eff':    'Cap Eff %',
+                            'stability':  'RR Time Stability %',
+                            'mtbf':       'MTBF (min)',
+                            'mttr':       'MTTR (min)',
+                            'prod_hrs':   'Prod Hrs',
+                            'parts':      'Parts',
+                            'runs':       'Prod Runs',
+                        })
+                    )
+
+                    def _style_bm(row):
+                        styles = [''] * len(row)
+                        for i, col in enumerate(by_machine_disp.columns):
+                            if col == 'Cap Eff %':
+                                v = row[col]
+                                styles[i] = (f'color:{C["green"]};font-weight:bold' if v >= 95
+                                             else (f'color:{C["orange"]}' if v >= 75 else f'color:{C["red"]}'))
+                        return styles
+
+                    st.markdown("**All machines tested:**")
+                    st.dataframe(
+                        by_machine_disp.style.apply(_style_bm, axis=1)
+                                       .format({'Cap Eff %': '{:.0f}%', 'RR Time Stability %': '{:.0f}%',
+                                                'MTBF (min)': '{:.0f}', 'MTTR (min)': '{:.1f}',
+                                                'Prod Hrs': '{:.0f}', 'Parts': '{:,.0f}'}, na_rep='—'),
+                        use_container_width=True, hide_index=True,
+                    )
+
+            # ── Global heatmap ────────────────────────────────────────────────
+            st.markdown("---")
             st.markdown("#### Cap Efficiency % — All Machines × All Tools")
             st.caption("Green = higher cap efficiency. Blank = not yet tested together.")
             pv = pd.pivot_table(
@@ -2151,14 +2193,15 @@ Thresholds (95 / 75) are consistent with the rest of the app (Risk Tower uses 95
             st.dataframe(
                 pv.style.background_gradient(cmap='RdYlGn', axis=None, vmin=70, vmax=105)
                         .format(precision=1, na_rep=''),
-                use_container_width=True
+                use_container_width=True,
             )
-        st.subheader("Tool Rankings by Machine")
+
+        # ── Tool Rankings by Machine (secondary, machine-centric reference) ───
+        st.markdown("---")
+        st.markdown("#### Tool Rankings by Machine")
         st.caption(
-            "Select a machine to see how every tool that has run on it compares. "
-            "**vs Best** shows how far each tool is behind the top performer on this machine. "
-            "**Parts Gain/hr** is how many more parts per hour this machine would produce "
-            "if it ran the best tool instead of this one."
+            "Machine-centric reference view. Select a machine to see every tool ranked by Cap Efficiency. "
+            "**vs Best** = pp difference from the top tool on this machine."
         )
 
         all_machines_rk = sorted(fit_df['machine_id'].unique())

@@ -2321,6 +2321,94 @@ def compute_recommendations(fit_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(recs).sort_values('cap_eff_spread', ascending=False).reset_index(drop=True)
 
 
+def compute_part_recommendations(fit_df: pd.DataFrame, copy_map: dict = None) -> pd.DataFrame:
+    """
+    Part/tool-centric view: for each part (copy group) or individual tool,
+    finds the optimal machine based on historical Cap Efficiency.
+
+    Returns one row per part, sorted by cap_eff_gain descending (largest
+    opportunity first). Each row carries aggregated machine-level stats for
+    the best and worst machines so the UI can render without re-filtering.
+    """
+    if fit_df.empty:
+        return pd.DataFrame()
+
+    # Build part_id → [tool_ids] mapping
+    if copy_map:
+        part_to_tools: dict = {}
+        for tool_id, part in copy_map.items():
+            if tool_id in fit_df['tool_id'].values:
+                part_to_tools.setdefault(part, []).append(tool_id)
+        # Tools not assigned to any copy group → individual entries
+        for t in fit_df['tool_id'].unique():
+            if t not in copy_map:
+                part_to_tools[t] = [t]
+    else:
+        part_to_tools = {t: [t] for t in fit_df['tool_id'].unique()}
+
+    recs = []
+    for part_id, tool_ids in part_to_tools.items():
+        part_fit = fit_df[fit_df['tool_id'].isin(tool_ids)]
+        if part_fit.empty:
+            continue
+
+        # Aggregate by machine: average across all copy tools of this part
+        by_machine = (
+            part_fit.groupby('machine_id')
+            .agg(
+                avg_cap_eff    =('cap_efficiency_pct', 'mean'),
+                avg_stability  =('stability_pct',      'mean'),
+                avg_mtbf       =('mtbf_min',           'mean'),
+                avg_mttr       =('mttr_min',           'mean'),
+                total_parts    =('total_parts',        'sum'),
+                production_hrs =('production_hrs',     'sum'),
+                runs           =('runs',               'sum'),
+            )
+            .round(1)
+            .reset_index()
+            .sort_values('avg_cap_eff', ascending=False)
+            .reset_index(drop=True)
+        )
+
+        if by_machine.empty:
+            continue
+
+        best  = by_machine.iloc[0]
+        worst = by_machine.iloc[-1]
+
+        # Supplier of the tool with highest cap eff on the best machine
+        best_tool_rows = part_fit[part_fit['machine_id'] == best['machine_id']] \
+                             .sort_values('cap_efficiency_pct', ascending=False)
+        best_supplier = best_tool_rows.iloc[0]['supplier_id'] if not best_tool_rows.empty else '—'
+        best_tool_id  = best_tool_rows.iloc[0]['tool_id']     if not best_tool_rows.empty else '—'
+
+        recs.append({
+            'part_id':         part_id,
+            'tools':           ', '.join(sorted(tool_ids)),
+            'tool_count':      len(tool_ids),
+            'machines_tested': len(by_machine),
+            'best_machine':    best['machine_id'],
+            'best_tool_id':    best_tool_id,
+            'best_supplier':   best_supplier,
+            'best_cap_eff':    round(best['avg_cap_eff'],   1),
+            'best_stability':  round(best['avg_stability'], 1),
+            'best_mtbf':       round(best['avg_mtbf'],      1),
+            'best_mttr':       round(best['avg_mttr'],      1),
+            'best_prod_hrs':   round(best['production_hrs'],1),
+            'best_parts':      round(best['total_parts'],   0),
+            'worst_machine':   worst['machine_id'],
+            'worst_cap_eff':   round(worst['avg_cap_eff'],  1),
+            'avg_cap_eff':     round(by_machine['avg_cap_eff'].mean(), 1),
+            'cap_eff_gain':    round(best['avg_cap_eff'] - worst['avg_cap_eff'], 1),
+        })
+
+    if not recs:
+        return pd.DataFrame()
+    return (pd.DataFrame(recs)
+              .sort_values('cap_eff_gain', ascending=False)
+              .reset_index(drop=True))
+
+
 # ==============================================================================
 # --- MATCH EFFICIENCY RATE ---
 # ==============================================================================
