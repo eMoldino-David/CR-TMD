@@ -90,6 +90,86 @@ def load_logistics_plan(file):
     except Exception:
         return pd.DataFrame()
 
+
+def collapse_po_record(po_df):
+    """Collapse multiple logistics rows for the same PO into a single dict.
+
+    For multi-part POs the logistics file may contain one row per part.
+    This aggregates them: sum total_qty, earliest start_date, latest due_date,
+    and takes the first value for all other columns.
+    """
+    if po_df.empty:
+        return {}
+    if len(po_df) == 1:
+        return po_df.iloc[0].to_dict()
+
+    row = po_df.iloc[0].to_dict()
+    if 'total_qty' in po_df.columns:
+        row['total_qty'] = po_df['total_qty'].sum()
+    if 'start_date' in po_df.columns:
+        valid = po_df['start_date'].dropna()
+        if not valid.empty:
+            row['start_date'] = valid.min()
+    if 'due_date' in po_df.columns:
+        valid = po_df['due_date'].dropna()
+        if not valid.empty:
+            row['due_date'] = valid.max()
+    return row
+
+
+def evaluate_po_step_milestones(po_rec_df, current_cum, avg_daily_rate, last_actual_date, today):
+    """Evaluate a multi-part PO against its chronological milestone deadlines (step-function).
+
+    When one po_number has multiple rows in the logistics plan (different parts with
+    different due dates), collapsing to max(due_date) + sum(qty) misses intermediate
+    deadlines. This function iterates each milestone chronologically and flags the
+    first one the current trajectory will miss.
+
+    Returns a dict with status, first_failing_due_date, first_failing_part, and
+    projected/required quantities at the failing milestone — or None if insufficient data.
+    """
+    if po_rec_df.empty or len(po_rec_df) < 2:
+        return None  # Single-row PO: no intermediate milestones to evaluate
+    if avg_daily_rate <= 0 or last_actual_date is None:
+        return None
+
+    required_cols = {'due_date', 'total_qty'}
+    if not required_cols.issubset(po_rec_df.columns):
+        return None
+
+    work = po_rec_df[['due_date', 'total_qty'] + (['part_id'] if 'part_id' in po_rec_df.columns else [])].copy()
+    work['due_date'] = pd.to_datetime(work['due_date'], errors='coerce')
+    work['total_qty'] = pd.to_numeric(work['total_qty'], errors='coerce').fillna(0)
+    work = work.dropna(subset=['due_date'])
+
+    # Group in case multiple parts share an exact due date
+    group_cols = ['due_date']
+    agg_dict = {'total_qty': 'sum'}
+    if 'part_id' in work.columns:
+        agg_dict['part_id'] = 'first'
+    milestones = work.groupby('due_date', as_index=False).agg(agg_dict).sort_values('due_date')
+    milestones['cumulative_target'] = milestones['total_qty'].cumsum()
+
+    last_date = pd.Timestamp(last_actual_date)
+
+    for _, ms in milestones.iterrows():
+        days_to_ms = (ms['due_date'] - last_date).days
+        projected = current_cum + (avg_daily_rate * max(days_to_ms, 0))
+        if projected < ms['cumulative_target']:
+            due_str = ms['due_date'].strftime('%Y-%m-%d')
+            ms_status = "Late" if ms['due_date'].date() < today else "At Risk"
+            part_label = str(ms.get('part_id', '')) if 'part_id' in ms.index else ''
+            return {
+                'status': ms_status,
+                'first_failing_due_date': due_str,
+                'first_failing_part': part_label,
+                'projected_at_milestone': round(projected, 0),
+                'required_at_milestone': round(float(ms['cumulative_target']), 0),
+            }
+
+    return {'status': 'On Track', 'first_failing_due_date': None, 'first_failing_part': None}
+
+
 def load_all_data_cr(files):
     """
     Loads and standardises production shot data.
@@ -214,10 +294,6 @@ def load_all_data_cr(files):
             if area_col:
                 df.rename(columns={area_col: "plant_area"}, inplace=True)
 
-            mach_col = get_col("MACHINE_ID", "MACHINE ID", "MACHINE", "PRESS_ID", "PRESS ID", "machine_id")
-            if mach_col and mach_col != "machine_id":
-                df.rename(columns={mach_col: "machine_id"}, inplace=True)
-
             if "shot_time" in df.columns and "actual_ct" in df.columns:
                 df["shot_time"] = pd.to_datetime(df["shot_time"], errors="coerce")
                 df["actual_ct"] = pd.to_numeric(df["actual_ct"], errors="coerce")
@@ -300,7 +376,7 @@ class CapacityRiskCalculator:
         df['run_id'] = (is_new_run | mask_first_shot).cumsum()
 
         # 2. Mode CT & Limits
-        run_modes = df[df['actual_ct'] < 1000].groupby('run_id')['actual_ct'].apply(
+        run_modes = df[df['actual_ct'] < 999.9].groupby('run_id')['actual_ct'].apply(
             _get_stable_mode
         )
         df['mode_ct'] = df['run_id'].map(run_modes)
@@ -581,15 +657,9 @@ def get_aggregated_data(df, freq_mode, config):
         total_shots   = run_breakdown_df['total_shots'].sum()
         normal_shots  = run_breakdown_df['normal_shots'].sum()
 
-        period_label = period
-        if freq_mode == 'by Run':
-            try:
-                period_label = f"Run {int(period) + 1}"
-            except (ValueError, TypeError):
-                pass
-
         agg_rows.append({
-            'Period':             period_label,
+            'Period':             period,
+            'Runs':               len(run_breakdown_df),
             'Actual Output':      act_output,
             'Optimal Output':     opt_output,
             'Target Output':      tgt_output,
@@ -611,7 +681,10 @@ def get_aggregated_data(df, freq_mode, config):
 
     if not agg_rows:
         return pd.DataFrame()
-    return pd.DataFrame(agg_rows).sort_values('Period').reset_index(drop=True)
+    df_agg = pd.DataFrame(agg_rows).sort_values('Period').reset_index(drop=True)
+    if freq_mode == 'by Run':
+        df_agg['Period'] = [f"Run {i}" for i in range(1, len(df_agg) + 1)]
+    return df_agg
 
 def generate_po_periodic_data(df_bar_view, po_record, freq_mode, config, working_days_per_week, working_hours_per_day):
     """Generates periodic aggregated data spanning the full PO timeline."""
@@ -695,7 +768,7 @@ def generate_po_periodic_data(df_bar_view, po_record, freq_mode, config, working
         
     return agg_df
 
-def generate_po_prediction_data(df_po_shots, po_record, config):
+def generate_po_prediction_data(df_po_shots, po_record, config, working_days=5, working_hours=24):
     """Generates time-series data specifically for PO Burn-up charting."""
     if pd.isna(po_record.get('start_date')) or pd.isna(po_record.get('due_date')):
         return None
@@ -1164,20 +1237,44 @@ def plot_po_burnup(pred_data, po_logistics_df=None):
             fig.add_vline(x=due_ts, line_width=2, line_dash="dash", line_color="red", annotation_text="PO Due Date")
     
     fig.add_hline(y=pred_data.get('total_qty', 0), line_width=2, line_dash="solid", line_color="purple", annotation_text="Total Aggregated Qty")
-    
-    # Force the X-axis bounds to represent the exact same context duration as the periodic chart
+
+    # ── Start date marker ─────────────────────────────────────────────────────
     start_dt = pd.to_datetime(pred_data.get('start_date', pd.Timestamp.now()))
-    max_dt_target = pd.to_datetime(pred_data['target_dates'][-1]) if len(pred_data.get('target_dates', [])) > 0 else start_dt
+    start_ts = start_dt.timestamp() * 1000
+    fig.add_vline(x=start_ts, line_width=1.5, line_dash="dot", line_color="rgba(100,200,255,0.6)",
+                  annotation_text="PO Start", annotation_position="top left",
+                  annotation_font=dict(color="rgba(100,200,255,0.9)", size=11))
+
+    # ── Due date — always visible with a filled annotation band ──────────────
+    due_dt_pd = pred_data.get('due_date')
+    if due_dt_pd is not None and pd.notna(due_dt_pd):
+        due_ts = pd.to_datetime(due_dt_pd).timestamp() * 1000
+        # Remove the basic vline already added above and re-add with stronger styling
+        fig.add_vline(x=due_ts, line_width=2, line_dash="dash", line_color="rgba(231,76,60,0.9)",
+                      annotation=dict(
+                          text="<b>Due Date</b>",
+                          font=dict(color="rgba(231,76,60,1.0)", size=12),
+                          bgcolor="rgba(231,76,60,0.15)",
+                          bordercolor="rgba(231,76,60,0.6)",
+                          borderwidth=1,
+                          borderpad=4,
+                      ),
+                      annotation_position="top right")
+
+    # Force the X-axis bounds
+    max_dt_target   = pd.to_datetime(pred_data['target_dates'][-1]) if len(pred_data.get('target_dates', [])) > 0 else start_dt
     max_dt_forecast = pd.to_datetime(pred_data['forecast_dates'][-1]) if len(pred_data.get('forecast_dates', [])) > 0 else max_dt_target
     end_dt = max(max_dt_target, max_dt_forecast)
 
     fig.update_layout(
-        title="PO Target Burn-up vs Reality", 
-        hovermode="x unified", 
-        height=500, 
-        yaxis_title="Accumulated Parts Output", 
+        title="PO Target Burn-up vs Reality",
+        hovermode="x unified",
+        height=500,
+        yaxis_title="Accumulated Parts Output",
         xaxis_title="Date",
-        xaxis_range=[start_dt, end_dt] 
+        xaxis_range=[start_dt, end_dt],
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
     )
     return fig
 
@@ -1764,7 +1861,7 @@ def plot_shot_analysis(df_shots, zoom_y=None):
     )
     return fig
 
-# ==============================================================================
+
 # --- TMD LOG ---
 # ==============================================================================
 
